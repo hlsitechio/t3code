@@ -126,6 +126,10 @@ describe("runtimeApiServer", () => {
     const client = await connectClient(server.wsUrl);
     const hello = await client.nextMessage();
     expect(hello.type).toBe("hello");
+    if (hello.type !== "hello") {
+      throw new Error("Expected hello message.");
+    }
+    expect(hello.launchCwd).toBe(process.cwd());
 
     const response = await sendRequest(
       client.socket,
