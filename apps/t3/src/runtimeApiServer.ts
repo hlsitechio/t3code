@@ -496,11 +496,15 @@ export async function startRuntimeApiServer(
       }
 
       if (!authToken) {
-        return true;
+        return request.searchParams.size === 0;
       }
 
       const tokens = request.searchParams.getAll("token");
-      return tokens.length === 1 && tokens[0] === authToken;
+      return (
+        request.searchParams.size === 1 &&
+        tokens.length === 1 &&
+        tokens[0] === authToken
+      );
     } catch {
       return false;
     }

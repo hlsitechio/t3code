@@ -1031,6 +1031,21 @@ describe("runtimeApiServer", () => {
     expect(duplicateTokenClose.code).toBe(4001);
     expect(duplicateTokenMessageCount).toBe(0);
 
+    const extraParamTokenUrl = `${authorizedUrl.origin}${authorizedUrl.pathname}?token=secret-token&debug=1`;
+    const extraParamTokenClient = new WebSocket(extraParamTokenUrl);
+    let extraParamTokenMessageCount = 0;
+    extraParamTokenClient.on("message", () => {
+      extraParamTokenMessageCount += 1;
+    });
+    const extraParamTokenClose = await withTimeout(
+      new Promise<{ code: number }>((resolve, reject) => {
+        extraParamTokenClient.once("close", (code) => resolve({ code }));
+        extraParamTokenClient.once("error", (error) => reject(error));
+      }),
+    );
+    expect(extraParamTokenClose.code).toBe(4001);
+    expect(extraParamTokenMessageCount).toBe(0);
+
     const wrongPathTokenUrl = `${authorizedUrl.origin}/unexpected?token=secret-token`;
     const wrongPathTokenClient = new WebSocket(wrongPathTokenUrl);
     let wrongPathTokenMessageCount = 0;
@@ -1072,6 +1087,20 @@ describe("runtimeApiServer", () => {
     );
     expect(wrongPathClose.code).toBe(4001);
     expect(wrongPathMessageCount).toBe(0);
+
+    const unexpectedQueryClient = new WebSocket(`${server.wsUrl}?debug=1`);
+    let unexpectedQueryMessageCount = 0;
+    unexpectedQueryClient.on("message", () => {
+      unexpectedQueryMessageCount += 1;
+    });
+    const unexpectedQueryClose = await withTimeout(
+      new Promise<{ code: number }>((resolve, reject) => {
+        unexpectedQueryClient.once("close", (code) => resolve({ code }));
+        unexpectedQueryClient.once("error", (error) => reject(error));
+      }),
+    );
+    expect(unexpectedQueryClose.code).toBe(4001);
+    expect(unexpectedQueryMessageCount).toBe(0);
 
     const authorizedClient = await connectClient(server.wsUrl);
     const hello = await authorizedClient.nextMessage();

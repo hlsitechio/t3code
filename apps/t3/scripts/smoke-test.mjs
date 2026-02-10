@@ -53,11 +53,11 @@ async function terminateProcess(processRef, timeoutMs = 5_000) {
   await waitForProcessExit(processRef);
 }
 
-function waitForUnauthorizedCloseWithoutMessages(socket, timeoutMs = 10_000) {
+function waitForUnauthorizedCloseWithoutMessages(socket, label, timeoutMs = 10_000) {
   return new Promise((resolve, reject) => {
     let messageCount = 0;
     const timer = setTimeout(() => {
-      reject(new Error("Smoke test failed: websocket close event timed out."));
+      reject(new Error(`Smoke test failed: ${label} websocket close event timed out.`));
     }, timeoutMs);
 
     socket.addEventListener("message", () => {
@@ -68,7 +68,7 @@ function waitForUnauthorizedCloseWithoutMessages(socket, timeoutMs = 10_000) {
       if (event.code !== 4001) {
         reject(
           new Error(
-            `Smoke test failed: expected unauthorized close code 4001, received ${event.code}.`,
+            `Smoke test failed: expected unauthorized close code 4001 for ${label}, received ${event.code}.`,
           ),
         );
         return;
@@ -76,7 +76,7 @@ function waitForUnauthorizedCloseWithoutMessages(socket, timeoutMs = 10_000) {
       if (messageCount > 0) {
         reject(
           new Error(
-            `Smoke test failed: unauthorized websocket received ${messageCount} message(s) before close.`,
+            `Smoke test failed: unauthorized websocket ${label} received ${messageCount} message(s) before close.`,
           ),
         );
         return;
@@ -85,7 +85,7 @@ function waitForUnauthorizedCloseWithoutMessages(socket, timeoutMs = 10_000) {
     });
     socket.addEventListener("error", () => {
       clearTimeout(timer);
-      reject(new Error("Smoke test failed: websocket client error before close."));
+      reject(new Error(`Smoke test failed: ${label} websocket client error before close.`));
     });
   });
 }
@@ -1433,34 +1433,41 @@ async function main() {
 
     const unauthorizedWsUrl = `${parsedWsUrl.origin}${parsedWsUrl.pathname}`;
     const unauthorizedWs = new WebSocket(unauthorizedWsUrl);
-    await waitForUnauthorizedCloseWithoutMessages(unauthorizedWs);
+    await waitForUnauthorizedCloseWithoutMessages(unauthorizedWs, "missing-token");
 
     const wrongTokenWs = new WebSocket(
       `${parsedWsUrl.origin}${parsedWsUrl.pathname}?token=wrong-token`,
     );
-    await waitForUnauthorizedCloseWithoutMessages(wrongTokenWs);
+    await waitForUnauthorizedCloseWithoutMessages(wrongTokenWs, "wrong-token");
 
     const emptyTokenWs = new WebSocket(`${parsedWsUrl.origin}${parsedWsUrl.pathname}?token=`);
-    await waitForUnauthorizedCloseWithoutMessages(emptyTokenWs);
+    await waitForUnauthorizedCloseWithoutMessages(emptyTokenWs, "empty-token");
 
     const whitespaceTokenWs = new WebSocket(
       `${parsedWsUrl.origin}${parsedWsUrl.pathname}?token=%20%20`,
     );
-    await waitForUnauthorizedCloseWithoutMessages(whitespaceTokenWs);
+    await waitForUnauthorizedCloseWithoutMessages(whitespaceTokenWs, "whitespace-token");
 
     const duplicateTokenWs = new WebSocket(
       `${parsedWsUrl.origin}${parsedWsUrl.pathname}?token=${encodeURIComponent(
         parsedWsUrl.searchParams.get("token") ?? "",
       )}&token=wrong-token`,
     );
-    await waitForUnauthorizedCloseWithoutMessages(duplicateTokenWs);
+    await waitForUnauthorizedCloseWithoutMessages(duplicateTokenWs, "duplicate-token");
+
+    const extraParamTokenWs = new WebSocket(
+      `${parsedWsUrl.origin}${parsedWsUrl.pathname}?token=${encodeURIComponent(
+        parsedWsUrl.searchParams.get("token") ?? "",
+      )}&debug=1`,
+    );
+    await waitForUnauthorizedCloseWithoutMessages(extraParamTokenWs, "extra-param-token");
 
     const wrongPathTokenWs = new WebSocket(
       `${parsedWsUrl.origin}/unexpected?token=${encodeURIComponent(
         parsedWsUrl.searchParams.get("token") ?? "",
       )}`,
     );
-    await waitForUnauthorizedCloseWithoutMessages(wrongPathTokenWs);
+    await waitForUnauthorizedCloseWithoutMessages(wrongPathTokenWs, "wrong-path-token");
 
     const ws = new WebSocket(wsUrl);
     await new Promise((resolve, reject) => {
@@ -1649,7 +1656,10 @@ async function main() {
         parsedWsUrl.searchParams.get("token") ?? "",
       )}&token=wrong-token`,
     );
-    await waitForUnauthorizedCloseWithoutMessages(duplicateTokenWhileConnectedWs);
+    await waitForUnauthorizedCloseWithoutMessages(
+      duplicateTokenWhileConnectedWs,
+      "duplicate-token-while-connected",
+    );
 
     await new Promise((resolve, reject) => {
       const timer = setTimeout(
