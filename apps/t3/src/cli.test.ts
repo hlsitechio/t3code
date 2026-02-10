@@ -985,6 +985,7 @@ describe("ifNoneMatchSatisfied", () => {
     expect(ifNoneMatchSatisfied("W/\"abc\"", "\"abc\"")).toBe(true);
     expect(ifNoneMatchSatisfied("\"abc\"", "W/\"abc\"")).toBe(true);
     expect(ifNoneMatchSatisfied("w/\"abc\"", "\"abc\"")).toBe(true);
+    expect(ifNoneMatchSatisfied("   W/\"abc\"   ", "\"abc\"")).toBe(true);
   });
 
   it("does not match non-identical etags", () => {
