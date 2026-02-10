@@ -5,7 +5,7 @@ Move model alias/default normalization into `packages/contracts` so desktop and 
 
 ## Motivation
 - Removes duplicated logic between:
-  - `apps/desktop/src/codexAppServerManager.ts`
+  - `packages/runtime-core/src/codexAppServerManager.ts`
   - `apps/renderer/src/model-logic.ts`
 - Prevents behavior drift when model aliases/defaults are updated.
 
@@ -22,7 +22,7 @@ Move model alias/default normalization into `packages/contracts` so desktop and 
    - `resolveModelSlug`
    - `DEFAULT_MODEL`
 2. Export model utilities from `packages/contracts/src/index.ts`.
-3. Update `apps/desktop/src/codexAppServerManager.ts` to replace local alias map/helper.
+3. Update `packages/runtime-core/src/codexAppServerManager.ts` to replace local alias map/helper.
 4. Update `apps/renderer/src/model-logic.ts` to wrap or re-export shared functions.
 5. Update tests:
    - Move/duplicate normalization tests to contracts.
@@ -38,5 +38,5 @@ Move model alias/default normalization into `packages/contracts` so desktop and 
 - Manual check that model selection and session start still send expected model slug.
 
 ## Done Criteria
-- No duplicated alias/default map in desktop and renderer.
+- No duplicated alias/default map in runtime-core and renderer.
 - Shared model utilities are contract-tested.

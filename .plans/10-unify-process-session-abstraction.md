@@ -4,11 +4,11 @@
 Refactor `ProcessManager` to use a single runtime-session interface for child-process and PTY modes.
 
 ## Motivation
-- `apps/desktop/src/processManager.ts` maintains parallel maps and branch-heavy logic.
+- `packages/runtime-core/src/processManager.ts` maintains parallel maps and branch-heavy logic.
 - New execution backends/providers will multiply complexity.
 
 ## Scope
-- Desktop process execution internals.
+- Runtime-core process execution internals.
 - Preserve public `ProcessManager` API.
 
 ## Proposed Changes

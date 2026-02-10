@@ -4,7 +4,7 @@
 Split `CodexAppServerManager` into smaller modules with clear responsibilities.
 
 ## Motivation
-- `apps/desktop/src/codexAppServerManager.ts` is large and mixes:
+- `packages/runtime-core/src/codexAppServerManager.ts` is large and mixes:
   - Process lifecycle
   - JSON-RPC parsing/routing
   - Session state transitions
@@ -12,7 +12,7 @@ Split `CodexAppServerManager` into smaller modules with clear responsibilities.
 - This increases regression risk and slows changes.
 
 ## Scope
-- Desktop provider internals only.
+- Runtime-core provider internals only.
 - Keep external behavior/API stable.
 
 ## Proposed Changes

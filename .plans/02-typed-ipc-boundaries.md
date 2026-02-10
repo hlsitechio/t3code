@@ -1,37 +1,37 @@
-# Plan: Strengthen Typed IPC Boundaries in Main Process
+# Plan: Strengthen Typed WS RPC Boundaries in Runtime Server
 
 ## Summary
-Replace loose payload casting in IPC handlers with strict schema parsing and typed helper wrappers.
+Replace loose payload casting in runtime RPC handlers with strict schema parsing and typed helper wrappers.
 
 ## Motivation
-- `apps/desktop/src/main.ts` currently uses casts like `payload as Parameters<...>`.
+- `apps/t3/src/runtimeApiServer.ts` should avoid payload casts and parse all unknown input at the RPC boundary.
 - Casts can hide contract breakages until runtime.
 
 ## Scope
-- Desktop main process IPC registration.
-- Optional shared helper for handler registration.
+- Runtime WebSocket RPC registration and method dispatch.
+- Optional shared helper for method-level parse/dispatch registration.
 
 ## Proposed Changes
-1. Add IPC helper utility (e.g. `apps/desktop/src/ipcHelpers.ts`) to:
+1. Add RPC helper utility (e.g. `apps/t3/src/rpcHelpers.ts`) to:
    - Parse payload(s) with Zod schemas
    - Standardize typed handler signatures
-2. Refactor provider IPC handlers in `apps/desktop/src/main.ts` to use:
+2. Refactor provider RPC handlers in `apps/t3/src/runtimeApiServer.ts` to use:
    - `providerSessionStartInputSchema.parse`
    - `providerSendTurnInputSchema.parse`
    - `providerInterruptTurnInputSchema.parse`
    - `providerStopSessionInputSchema.parse`
-3. Apply same pattern to agent/terminal handlers where possible.
-4. Add tests for handler parsing failure paths (invalid payloads).
+3. Apply same pattern to app/todo/agent/terminal/shell handlers where possible.
+4. Add tests for parsing failure paths (invalid payloads).
 
 ## Risks
-- Refactor can subtly change IPC error shape/messages.
+- Refactor can subtly change RPC error shape/messages.
 - Helper abstraction should stay simple and not obscure control flow.
 
 ## Validation
 - `bun run test`
 - `bun run typecheck`
-- Manual invalid payload check from renderer/devtools to confirm fast failure.
+- Manual invalid payload check from websocket client/devtools to confirm fast failure.
 
 ## Done Criteria
-- No provider handler uses `payload as Parameters<...>`.
-- All IPC entrypoints parse unknown payloads at boundary.
+- No runtime handler uses `payload as Parameters<...>`.
+- All websocket RPC entrypoints parse unknown payloads at boundary.
