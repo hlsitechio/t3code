@@ -41,8 +41,7 @@ import {
   wsNativeApiMethodSchema,
   wsServerMessageSchema,
 } from "@acme/contracts";
-import { ProcessManager, TodoStore } from "@acme/runtime-core";
-import { ProviderManager } from "../../desktop/src/providerManager";
+import { ProcessManager, ProviderManager, TodoStore } from "@acme/runtime-core";
 
 interface RuntimeApiServerOptions {
   port: number;
