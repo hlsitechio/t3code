@@ -103,6 +103,14 @@ describe("parseCliOptions", () => {
     expect(options.noOpen).toBe(false);
   });
 
+  it("supports numeric equals-style --open values", () => {
+    const enabled = parseCliOptions(["--open=1"], { T3_NO_OPEN: "true" }, "/workspace");
+    expect(enabled.noOpen).toBe(false);
+
+    const disabled = parseCliOptions(["--open=0"], { T3_NO_OPEN: "false" }, "/workspace");
+    expect(disabled.noOpen).toBe(true);
+  });
+
   it("supports equals-style --open off values", () => {
     const options = parseCliOptions(["--open=off"], {}, "/workspace");
     expect(options.noOpen).toBe(true);
