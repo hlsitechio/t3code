@@ -2156,4 +2156,112 @@ describe("wsNativeApi", () => {
     expect(outputEvents).toHaveLength(1);
     expect(exitEvents).toHaveLength(1);
   });
+
+  it("ignores stale agent events from prior sockets after reconnect", async () => {
+    setWindowSearch("?ws=ws%3A%2F%2F127.0.0.1%3A4479");
+    const { getOrCreateWsNativeApi } = await import("./wsNativeApi");
+    const api = getOrCreateWsNativeApi();
+
+    const outputEvents: unknown[] = [];
+    const exitEvents: unknown[] = [];
+    const unsubscribeOutput = api.agent.onOutput((event) => {
+      outputEvents.push(event);
+    });
+    const unsubscribeExit = api.agent.onExit((event) => {
+      exitEvents.push(event);
+    });
+
+    const firstRequest = api.todos.list();
+    const firstSocket = MockWebSocket.instances[0];
+    await waitForCondition(() => (firstSocket?.sentMessages.length ?? 0) > 0);
+    const firstEnvelope = JSON.parse(firstSocket?.sentMessages[0] ?? "{}") as {
+      id: string;
+    };
+    firstSocket?.emitMessage(
+      JSON.stringify({
+        type: "response",
+        id: firstEnvelope.id,
+        ok: true,
+        result: [],
+      }),
+    );
+    await expect(firstRequest).resolves.toEqual([]);
+
+    firstSocket?.closeWith({
+      code: WS_CLOSE_CODES.unauthorized,
+      reason: WS_CLOSE_REASONS.unauthorized,
+    });
+
+    const secondRequest = api.todos.list();
+    await waitForCondition(() => MockWebSocket.instances.length >= 2);
+    const secondSocket = MockWebSocket.instances[1];
+    await waitForCondition(() => (secondSocket?.sentMessages.length ?? 0) > 0);
+    const secondEnvelope = JSON.parse(secondSocket?.sentMessages[0] ?? "{}") as {
+      id: string;
+    };
+    secondSocket?.emitMessage(
+      JSON.stringify({
+        type: "response",
+        id: secondEnvelope.id,
+        ok: true,
+        result: [],
+      }),
+    );
+    await expect(secondRequest).resolves.toEqual([]);
+
+    firstSocket?.emitMessage(
+      JSON.stringify({
+        type: "event",
+        channel: "agent:output",
+        payload: {
+          sessionId: "agent-session-1",
+          stream: "stdout",
+          data: "stale-output",
+        },
+      }),
+    );
+    firstSocket?.emitMessage(
+      JSON.stringify({
+        type: "event",
+        channel: "agent:exit",
+        payload: {
+          sessionId: "agent-session-1",
+          code: 0,
+          signal: null,
+        },
+      }),
+    );
+    await new Promise((resolve) => {
+      setTimeout(resolve, 25);
+    });
+    expect(outputEvents).toHaveLength(0);
+    expect(exitEvents).toHaveLength(0);
+
+    secondSocket?.emitMessage(
+      JSON.stringify({
+        type: "event",
+        channel: "agent:output",
+        payload: {
+          sessionId: "agent-session-1",
+          stream: "stdout",
+          data: "active-output",
+        },
+      }),
+    );
+    secondSocket?.emitMessage(
+      JSON.stringify({
+        type: "event",
+        channel: "agent:exit",
+        payload: {
+          sessionId: "agent-session-1",
+          code: 0,
+          signal: null,
+        },
+      }),
+    );
+    await waitForCondition(() => outputEvents.length === 1 && exitEvents.length === 1);
+
+    unsubscribeOutput();
+    unsubscribeExit();
+  });
 });
