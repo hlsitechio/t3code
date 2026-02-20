@@ -6,6 +6,10 @@ import path from "node:path";
 import { parsePatchFiles } from "@pierre/diffs";
 import {
   DEFAULT_MODEL,
+  type AppSettings,
+  type AppSettingsUpdateInput,
+  appSettingsSchema,
+  appSettingsUpdateInputSchema,
   type ProjectAddInput,
   type ProjectAddResult,
   type ProjectListResult,
@@ -67,6 +71,7 @@ import { StateDb } from "./stateDb";
 
 const METADATA_KEY_PROJECTS_JSON_IMPORTED = "migration.projects_json_imported";
 const METADATA_KEY_LEGACY_RENDERER_IMPORTED = "migration.legacy_renderer_imported";
+const METADATA_KEY_APP_SETTINGS = "app.settings.v1";
 const MAX_TERMINAL_COUNT = 4;
 const DEFAULT_TERMINAL_ID = "default";
 const DEFAULT_TERMINAL_HEIGHT = 280;
@@ -448,6 +453,25 @@ export class PersistenceService extends EventEmitter<PersistenceServiceEvents> {
 
   close(): void {
     this.stateDb.close();
+  }
+
+  getAppSettings(): AppSettings {
+    const metadataValue = this.readMetadata(METADATA_KEY_APP_SETTINGS);
+    const parsed = appSettingsSchema.safeParse(metadataValue);
+    if (parsed.success) {
+      return parsed.data;
+    }
+    return appSettingsSchema.parse({});
+  }
+
+  updateAppSettings(raw: AppSettingsUpdateInput): AppSettings {
+    const patch = appSettingsUpdateInputSchema.parse(raw);
+    const next = appSettingsSchema.parse({
+      ...this.getAppSettings(),
+      ...patch,
+    });
+    this.writeMetadata(METADATA_KEY_APP_SETTINGS, next);
+    return next;
   }
 
   listProjects(): ProjectListResult {

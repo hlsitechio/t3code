@@ -26,6 +26,44 @@ afterEach(() => {
 });
 
 describe("PersistenceService", () => {
+  it("stores app settings in metadata with partial updates", () => {
+    const stateDir = makeTempDir("t3code-persistence-settings-state-");
+    const dbPath = path.join(stateDir, "state.sqlite");
+    const service = new PersistenceService({ dbPath });
+
+    expect(service.getAppSettings()).toEqual({
+      codexBinaryPath: "",
+      codexHomePath: "",
+    });
+
+    expect(
+      service.updateAppSettings({
+        codexBinaryPath: "  /opt/codex/bin/codex  ",
+      }),
+    ).toEqual({
+      codexBinaryPath: "/opt/codex/bin/codex",
+      codexHomePath: "",
+    });
+
+    expect(
+      service.updateAppSettings({
+        codexHomePath: "  /Users/theo/.codex  ",
+      }),
+    ).toEqual({
+      codexBinaryPath: "/opt/codex/bin/codex",
+      codexHomePath: "/Users/theo/.codex",
+    });
+
+    service.close();
+
+    const reopened = new PersistenceService({ dbPath });
+    expect(reopened.getAppSettings()).toEqual({
+      codexBinaryPath: "/opt/codex/bin/codex",
+      codexHomePath: "/Users/theo/.codex",
+    });
+    reopened.close();
+  });
+
   it("persists projects/threads/messages and serves bootstrap + catch-up", () => {
     const stateDir = makeTempDir("t3code-persistence-state-");
     const projectDir = makeTempDir("t3code-persistence-project-");

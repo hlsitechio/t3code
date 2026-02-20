@@ -107,6 +107,10 @@ export function createWsNativeApi(): NativeApi {
       onEvent: (callback) =>
         transport.subscribe(WS_CHANNELS.stateEvent, callback as (data: unknown) => void),
     },
+    appSettings: {
+      get: () => transport.request(WS_METHODS.appSettingsGet),
+      update: (input) => transport.request(WS_METHODS.appSettingsUpdate, input),
+    },
     threads: {
       create: (input) => transport.request(WS_METHODS.threadsCreate, input),
       update: (input) => transport.request(WS_METHODS.threadsUpdate, input),

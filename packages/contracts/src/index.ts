@@ -1,4 +1,5 @@
 export * from "./todo";
+export * from "./appSettings";
 export * from "./ipc";
 export * from "./agent";
 export * from "./terminal";

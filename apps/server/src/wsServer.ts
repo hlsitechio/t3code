@@ -367,6 +367,12 @@ export function createServer(options: ServerOptions) {
       case WS_METHODS.stateImportLegacyRendererState:
         return persistenceService.importLegacyRendererState(request.params as never);
 
+      case WS_METHODS.appSettingsGet:
+        return persistenceService.getAppSettings();
+
+      case WS_METHODS.appSettingsUpdate:
+        return persistenceService.updateAppSettings((request.params ?? {}) as never);
+
       case WS_METHODS.threadsCreate:
         return persistenceService.createThread(request.params as never);
 

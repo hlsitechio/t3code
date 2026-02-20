@@ -660,6 +660,42 @@ describe("WebSocket Server", () => {
     expect(response.result).toEqual([]);
   });
 
+  it("persists app settings through appSettings RPC methods", async () => {
+    const stateDir = makeTempDir("t3code-ws-app-settings-");
+    server = createTestServer({ cwd: "/test", stateDir });
+    await server.start();
+    const addr = server.httpServer.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+
+    const ws = await connectWs(port);
+    connections.push(ws);
+    await waitForMessage(ws);
+
+    const initial = await sendRequest(ws, WS_METHODS.appSettingsGet);
+    expect(initial.error).toBeUndefined();
+    expect(initial.result).toEqual({
+      codexBinaryPath: "",
+      codexHomePath: "",
+    });
+
+    const updated = await sendRequest(ws, WS_METHODS.appSettingsUpdate, {
+      codexBinaryPath: "  /opt/codex/bin/codex  ",
+      codexHomePath: "  /Users/theo/.codex  ",
+    });
+    expect(updated.error).toBeUndefined();
+    expect(updated.result).toEqual({
+      codexBinaryPath: "/opt/codex/bin/codex",
+      codexHomePath: "/Users/theo/.codex",
+    });
+
+    const roundTrip = await sendRequest(ws, WS_METHODS.appSettingsGet);
+    expect(roundTrip.error).toBeUndefined();
+    expect(roundTrip.result).toEqual({
+      codexBinaryPath: "/opt/codex/bin/codex",
+      codexHomePath: "/Users/theo/.codex",
+    });
+  });
+
   it("supports state bootstrap and ordered catch-up events", async () => {
     const stateDir = makeTempDir("t3code-ws-state-bootstrap-");
     const projectCwd = makeTempDir("t3code-ws-state-project-");

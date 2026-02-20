@@ -1,4 +1,5 @@
 import type { AgentConfig, AgentExit, OutputChunk } from "./agent";
+import type { AppSettings, AppSettingsUpdateInput } from "./appSettings";
 import type {
   GitCheckoutInput,
   GitCreateBranchInput,
@@ -132,6 +133,10 @@ export interface NativeApi {
       input: StateImportLegacyRendererStateInput,
     ) => Promise<StateImportLegacyRendererStateResult>;
     onEvent: (callback: (event: StateEvent) => void) => () => void;
+  };
+  appSettings: {
+    get: () => Promise<AppSettings>;
+    update: (input: AppSettingsUpdateInput) => Promise<AppSettings>;
   };
   threads: {
     create: (input: ThreadsCreateInput) => Promise<ThreadsUpdateResult>;

@@ -8,6 +8,8 @@ export const WS_METHODS = {
   stateListMessages: "state.listMessages",
   stateCatchUp: "state.catchUp",
   stateImportLegacyRendererState: "state.importLegacyRendererState",
+  appSettingsGet: "appSettings.get",
+  appSettingsUpdate: "appSettings.update",
 
   // Thread methods
   threadsCreate: "threads.create",
