@@ -4,7 +4,7 @@ import type {
   OrchestrationReadModel,
 } from "@t3tools/contracts";
 import { OrchestrationCommandSchema } from "@t3tools/contracts";
-import { Deferred, Effect, Layer, PubSub, Queue, Schema } from "effect";
+import { Deferred, Effect, Layer, Queue, Schema } from "effect";
 
 import { createLogger } from "../logger.ts";
 import { OrchestrationEventRepository } from "../persistence/Services/OrchestrationEvents.ts";
@@ -20,6 +20,7 @@ import { OrchestrationEngineService, type OrchestrationEngineShape } from "./Ser
 interface CommandEnvelope {
   command: OrchestrationCommand;
   result: Deferred.Deferred<{ sequence: number }, OrchestrationDispatchError>;
+  transient?: boolean | undefined;
 }
 
 function mapCommandToEvent(command: OrchestrationCommand): Omit<OrchestrationEvent, "sequence"> {
@@ -169,8 +170,6 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   let readModel = createEmptyReadModel(new Date().toISOString());
 
   const commandQueue = yield* Queue.unbounded<CommandEnvelope>();
-  const readModelPubSub = yield* PubSub.unbounded<OrchestrationReadModel>();
-  const eventPubSub = yield* PubSub.unbounded<OrchestrationEvent>();
 
   const readModelListeners = new Set<(snapshot: OrchestrationReadModel) => void>();
   const domainEventListeners = new Set<(event: OrchestrationEvent) => void>();
@@ -194,19 +193,28 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const processEnvelope = (envelope: CommandEnvelope): Effect.Effect<void> =>
     Effect.gen(function* () {
       const eventBase = mapCommandToEvent(envelope.command);
-      const savedEvent = yield* eventStore.append(eventBase);
+
+      let savedEvent: OrchestrationEvent;
+      if (envelope.transient) {
+        savedEvent = { ...eventBase, sequence: readModel.sequence };
+      } else {
+        savedEvent = yield* eventStore.append(eventBase);
+      }
       readModel = yield* reduceEvent(readModel, savedEvent);
 
-      const snapshot = readModel;
-      yield* Effect.all([
-        PubSub.publish(eventPubSub, savedEvent),
-        PubSub.publish(readModelPubSub, snapshot),
-      ]);
-
-      yield* notifyDomainEventListeners(savedEvent);
-      yield* notifyReadModelListeners(snapshot);
-
       yield* Deferred.succeed(envelope.result, { sequence: savedEvent.sequence });
+
+      const snapshot = readModel;
+      yield* notifyDomainEventListeners(savedEvent).pipe(
+        Effect.catch((error) =>
+          Effect.sync(() => logger.warn("domain event listener failed", { error: String(error) })),
+        ),
+      );
+      yield* notifyReadModelListeners(snapshot).pipe(
+        Effect.catch((error) =>
+          Effect.sync(() => logger.warn("read model listener failed", { error: String(error) })),
+        ),
+      );
     }).pipe(Effect.catch((error) => Deferred.fail(envelope.result, error).pipe(Effect.asVoid)));
 
   const bootstrapReadModel: Effect.Effect<void, OrchestrationDispatchError> = Effect.gen(
@@ -232,10 +240,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const replayEvents: OrchestrationEngineShape["replayEvents"] = (fromSequenceExclusive) =>
     eventStore.readFromSequence(fromSequenceExclusive);
 
-  const dispatch: OrchestrationEngineShape["dispatch"] = (command) =>
+  const dispatch: OrchestrationEngineShape["dispatch"] = (command, options) =>
     Effect.gen(function* () {
       const result = yield* Deferred.make<{ sequence: number }, OrchestrationDispatchError>();
-      yield* Queue.offer(commandQueue, { command, result });
+      yield* Queue.offer(commandQueue, { command, result, transient: options?.transient });
       return yield* Deferred.await(result);
     });
 

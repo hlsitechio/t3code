@@ -250,20 +250,29 @@ export function createServer(options: ServerOptions) {
       if (event.textDelta && event.textDelta.length > 0) {
         const assistantMessageId = `assistant:${event.turnId ?? event.itemId ?? event.sessionId}`;
         await runtime.runPromise(
-          liveOrchestrationEngine.dispatch({
-            type: "message.send",
-            commandId: crypto.randomUUID(),
-            threadId: thread.id,
-            messageId: assistantMessageId,
-            role: "assistant",
-            text: event.textDelta,
-            streaming: true,
-            createdAt: now,
-          }),
+          liveOrchestrationEngine.dispatch(
+            {
+              type: "message.send",
+              commandId: crypto.randomUUID(),
+              threadId: thread.id,
+              messageId: assistantMessageId,
+              role: "assistant",
+              text: event.textDelta,
+              streaming: true,
+              createdAt: now,
+            },
+            { transient: true },
+          ),
         );
       }
       if (event.method === "turn/completed") {
         const assistantMessageId = `assistant:${event.turnId ?? event.itemId ?? event.sessionId}`;
+        const latestSnapshot = await runtime.runPromise(liveOrchestrationEngine.getSnapshot());
+        const latestThread = latestSnapshot.threads.find(
+          (entry) => entry.session?.sessionId === event.sessionId,
+        );
+        const existingMessage = latestThread?.messages.find((m) => m.id === assistantMessageId);
+        const accumulatedText = existingMessage?.text ?? "";
         await runtime.runPromise(
           liveOrchestrationEngine.dispatch({
             type: "message.send",
@@ -271,7 +280,7 @@ export function createServer(options: ServerOptions) {
             threadId: thread.id,
             messageId: assistantMessageId,
             role: "assistant",
-            text: "",
+            text: accumulatedText,
             streaming: false,
             createdAt: now,
           }),

@@ -51,10 +51,12 @@ export interface OrchestrationEngineShape {
    * Dispatch a validated orchestration command.
    *
    * @param command - Valid orchestration command.
+   * @param options - Optional dispatch options. Set `transient` to skip persistence.
    * @returns Effect containing the sequence of the persisted event.
    */
   readonly dispatch: (
     command: OrchestrationCommand,
+    options?: { transient?: boolean | undefined } | undefined,
   ) => Effect.Effect<{ sequence: number }, OrchestrationDispatchError>;
 
   /**
