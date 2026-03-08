@@ -103,7 +103,7 @@ jobs:
           - label: Windows x64
             runner: windows-2022
             platform: win
-            target: nsis
+            target: msi
             arch: x64
     steps:
       - name: Checkout
@@ -200,6 +200,7 @@ jobs:
             "release/*.zip" \
             "release/*.AppImage" \
             "release/*.exe" \
+            "release/*.msi" \
             "release/*.blockmap" \
             "release/latest*.yml"; do
             for file in $pattern; do
@@ -276,6 +277,7 @@ jobs:
             release-assets/*.zip
             release-assets/*.AppImage
             release-assets/*.exe
+            release-assets/*.msi
             release-assets/*.blockmap
             release-assets/latest*.yml
           fail_on_unmatched_files: true
