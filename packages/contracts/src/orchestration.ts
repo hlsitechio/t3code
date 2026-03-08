@@ -27,7 +27,12 @@ export const ORCHESTRATION_WS_CHANNELS = {
   domainEvent: "orchestration.domainEvent",
 } as const;
 
-export const ProviderKind = Schema.Literal("codex");
+export const ProviderKind = Schema.Literals([
+  "codex",
+  "claude-code",
+  "gemini-cli",
+  "github-copilot-cli",
+]);
 export type ProviderKind = typeof ProviderKind.Type;
 export const ProviderApprovalPolicy = Schema.Literals([
   "untrusted",

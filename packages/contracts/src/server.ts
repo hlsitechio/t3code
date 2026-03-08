@@ -69,3 +69,23 @@ export const ServerConfigUpdatedPayload = Schema.Struct({
   providers: ServerProviderStatuses,
 });
 export type ServerConfigUpdatedPayload = typeof ServerConfigUpdatedPayload.Type;
+
+export const ServerCliId = Schema.Literals(["github-cli", "claude-cli", "gemini-cli"]);
+export type ServerCliId = typeof ServerCliId.Type;
+
+export const ServerCliInstallation = Schema.Struct({
+  id: ServerCliId,
+  found: Schema.Boolean,
+  command: TrimmedNonEmptyString,
+  path: Schema.optional(TrimmedNonEmptyString),
+  version: Schema.optional(TrimmedNonEmptyString),
+  authenticated: Schema.optional(Schema.Boolean),
+  message: Schema.optional(TrimmedNonEmptyString),
+});
+export type ServerCliInstallation = typeof ServerCliInstallation.Type;
+
+export const ServerDetectCliInstallationsInput = Schema.Struct({});
+export type ServerDetectCliInstallationsInput = typeof ServerDetectCliInstallationsInput.Type;
+
+export const ServerDetectCliInstallationsResult = Schema.Array(ServerCliInstallation);
+export type ServerDetectCliInstallationsResult = typeof ServerDetectCliInstallationsResult.Type;

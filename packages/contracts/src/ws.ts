@@ -31,6 +31,8 @@ import {
 import { KeybindingRule } from "./keybindings";
 import { ProjectSearchEntriesInput, ProjectWriteFileInput } from "./project";
 import { OpenInEditorInput } from "./editor";
+import { CanvasGetStateInput, CanvasUpsertStateInput } from "./canvas";
+import { ServerDetectCliInstallationsInput } from "./server";
 
 // ── WebSocket RPC Method Names ───────────────────────────────────────
 
@@ -64,9 +66,16 @@ export const WS_METHODS = {
   terminalRestart: "terminal.restart",
   terminalClose: "terminal.close",
 
+  // GitHub methods
+  githubStartDeviceFlow: "github.startDeviceFlow",
+  githubPollDeviceFlow: "github.pollDeviceFlow",
+
   // Server meta
   serverGetConfig: "server.getConfig",
   serverUpsertKeybinding: "server.upsertKeybinding",
+  serverDetectCliInstallations: "server.detectCliInstallations",
+  canvasGetState: "canvas.getState",
+  canvasUpsertState: "canvas.upsertState",
 } as const;
 
 // ── Push Event Channels ──────────────────────────────────────────────
@@ -126,9 +135,23 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.terminalRestart, TerminalRestartInput),
   tagRequestBody(WS_METHODS.terminalClose, TerminalCloseInput),
 
+  // GitHub methods
+  tagRequestBody(WS_METHODS.githubStartDeviceFlow, Schema.Struct({})),
+  tagRequestBody(
+    WS_METHODS.githubPollDeviceFlow,
+    Schema.Struct({
+      deviceCode: Schema.String.check(Schema.isMaxLength(512)),
+      interval: Schema.Number,
+      expiresIn: Schema.Number,
+    }),
+  ),
+
   // Server meta
   tagRequestBody(WS_METHODS.serverGetConfig, Schema.Struct({})),
   tagRequestBody(WS_METHODS.serverUpsertKeybinding, KeybindingRule),
+  tagRequestBody(WS_METHODS.serverDetectCliInstallations, ServerDetectCliInstallationsInput),
+  tagRequestBody(WS_METHODS.canvasGetState, CanvasGetStateInput),
+  tagRequestBody(WS_METHODS.canvasUpsertState, CanvasUpsertStateInput),
 ]);
 
 export const WebSocketRequest = Schema.Struct({

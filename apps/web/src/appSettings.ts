@@ -24,10 +24,34 @@ export const APP_SERVICE_TIER_OPTIONS = [
   },
 ] as const;
 export type AppServiceTier = (typeof APP_SERVICE_TIER_OPTIONS)[number]["value"];
+export const CANVAS_DEFAULT_TAB_OPTIONS = [
+  { value: "preview", label: "Preview" },
+  { value: "code", label: "Code" },
+  { value: "brief", label: "Brief" },
+] as const;
+export type CanvasDefaultTab = (typeof CANVAS_DEFAULT_TAB_OPTIONS)[number]["value"];
+export const CANVAS_PREVIEW_DEVICE_OPTIONS = [
+  { value: "desktop", label: "Desktop" },
+  { value: "tablet", label: "Tablet" },
+  { value: "mobile", label: "Mobile" },
+] as const;
+export type CanvasPreviewDevice = (typeof CANVAS_PREVIEW_DEVICE_OPTIONS)[number]["value"];
+export const GITHUB_AUTH_MODE_OPTIONS = [
+  { value: "gh-cli", label: "GitHub CLI" },
+  { value: "token", label: "Personal Access Token" },
+  { value: "oauth-device", label: "OAuth Device Flow" },
+] as const;
+export type GitHubAuthMode = (typeof GITHUB_AUTH_MODE_OPTIONS)[number]["value"];
 const AppServiceTierSchema = Schema.Literals(["auto", "fast", "flex"]);
+const CanvasDefaultTabSchema = Schema.Literals(["preview", "code", "brief"]);
+const CanvasPreviewDeviceSchema = Schema.Literals(["desktop", "tablet", "mobile"]);
+const GitHubAuthModeSchema = Schema.Literals(["gh-cli", "token", "oauth-device"]);
 const MODELS_WITH_FAST_SUPPORT = new Set(["gpt-5.4"]);
 const BUILT_IN_MODEL_SLUGS_BY_PROVIDER: Record<ProviderKind, ReadonlySet<string>> = {
   codex: new Set(getModelOptions("codex").map((option) => option.slug)),
+  "claude-code": new Set(getModelOptions("claude-code").map((option) => option.slug)),
+  "gemini-cli": new Set(getModelOptions("gemini-cli").map((option) => option.slug)),
+  "github-copilot-cli": new Set(getModelOptions("github-copilot-cli").map((option) => option.slug)),
 };
 
 const AppSettingsSchema = Schema.Struct({
@@ -41,9 +65,75 @@ const AppSettingsSchema = Schema.Struct({
   enableAssistantStreaming: Schema.Boolean.pipe(
     Schema.withConstructorDefault(() => Option.some(false)),
   ),
+  canvasAutoOpenOnUpdate: Schema.Boolean.pipe(
+    Schema.withConstructorDefault(() => Option.some(true)),
+  ),
+  canvasDefaultTab: CanvasDefaultTabSchema.pipe(
+    Schema.withConstructorDefault(() => Option.some("preview")),
+  ),
+  canvasPreviewDevice: CanvasPreviewDeviceSchema.pipe(
+    Schema.withConstructorDefault(() => Option.some("desktop")),
+  ),
   codexServiceTier: AppServiceTierSchema.pipe(Schema.withConstructorDefault(() => Option.some("auto"))),
   customCodexModels: Schema.Array(Schema.String).pipe(
     Schema.withConstructorDefault(() => Option.some([])),
+  ),
+  githubEnabled: Schema.Boolean.pipe(Schema.withConstructorDefault(() => Option.some(false))),
+  githubAuthMode: GitHubAuthModeSchema.pipe(
+    Schema.withConstructorDefault(() => Option.some("gh-cli")),
+  ),
+  githubToken: Schema.String.check(Schema.isMaxLength(8192)).pipe(
+    Schema.withConstructorDefault(() => Option.some("")),
+  ),
+  githubOwner: Schema.String.check(Schema.isMaxLength(256)).pipe(
+    Schema.withConstructorDefault(() => Option.some("")),
+  ),
+  githubRepo: Schema.String.check(Schema.isMaxLength(256)).pipe(
+    Schema.withConstructorDefault(() => Option.some("")),
+  ),
+  githubDefaultBaseBranch: Schema.String.check(Schema.isMaxLength(128)).pipe(
+    Schema.withConstructorDefault(() => Option.some("main")),
+  ),
+  githubWorkflowNameFilter: Schema.String.check(Schema.isMaxLength(512)).pipe(
+    Schema.withConstructorDefault(() => Option.some("")),
+  ),
+  githubDefaultLabels: Schema.String.check(Schema.isMaxLength(1024)).pipe(
+    Schema.withConstructorDefault(() => Option.some("")),
+  ),
+  githubAutoLinkIssues: Schema.Boolean.pipe(Schema.withConstructorDefault(() => Option.some(true))),
+  githubAutoReviewOnPr: Schema.Boolean.pipe(Schema.withConstructorDefault(() => Option.some(false))),
+  githubActionsAutoRerunFailed: Schema.Boolean.pipe(
+    Schema.withConstructorDefault(() => Option.some(false)),
+  ),
+  githubSecurityScanOnPush: Schema.Boolean.pipe(
+    Schema.withConstructorDefault(() => Option.some(false)),
+  ),
+  githubRequirePassingChecks: Schema.Boolean.pipe(
+    Schema.withConstructorDefault(() => Option.some(true)),
+  ),
+  githubCreateDraftPrByDefault: Schema.Boolean.pipe(
+    Schema.withConstructorDefault(() => Option.some(false)),
+  ),
+  githubSidebarControllerEnabled: Schema.Boolean.pipe(
+    Schema.withConstructorDefault(() => Option.some(true)),
+  ),
+  githubCliPath: Schema.String.check(Schema.isMaxLength(4096)).pipe(
+    Schema.withConstructorDefault(() => Option.some("")),
+  ),
+  githubCliArgs: Schema.String.check(Schema.isMaxLength(1024)).pipe(
+    Schema.withConstructorDefault(() => Option.some("")),
+  ),
+  claudeCliPath: Schema.String.check(Schema.isMaxLength(4096)).pipe(
+    Schema.withConstructorDefault(() => Option.some("")),
+  ),
+  claudeCliArgs: Schema.String.check(Schema.isMaxLength(1024)).pipe(
+    Schema.withConstructorDefault(() => Option.some("")),
+  ),
+  geminiCliPath: Schema.String.check(Schema.isMaxLength(4096)).pipe(
+    Schema.withConstructorDefault(() => Option.some("")),
+  ),
+  geminiCliArgs: Schema.String.check(Schema.isMaxLength(1024)).pipe(
+    Schema.withConstructorDefault(() => Option.some("")),
   ),
 });
 export type AppSettings = typeof AppSettingsSchema.Type;
@@ -108,6 +198,18 @@ function normalizeAppSettings(settings: AppSettings): AppSettings {
   return {
     ...settings,
     customCodexModels: normalizeCustomModelSlugs(settings.customCodexModels, "codex"),
+    githubToken: settings.githubToken.trim(),
+    githubOwner: settings.githubOwner.trim(),
+    githubRepo: settings.githubRepo.trim(),
+    githubDefaultBaseBranch: settings.githubDefaultBaseBranch.trim() || "main",
+    githubWorkflowNameFilter: settings.githubWorkflowNameFilter.trim(),
+    githubDefaultLabels: settings.githubDefaultLabels.trim(),
+    githubCliPath: settings.githubCliPath.trim(),
+    githubCliArgs: settings.githubCliArgs.trim(),
+    claudeCliPath: settings.claudeCliPath.trim(),
+    claudeCliArgs: settings.claudeCliArgs.trim(),
+    geminiCliPath: settings.geminiCliPath.trim(),
+    geminiCliArgs: settings.geminiCliArgs.trim(),
   };
 }
 
@@ -294,3 +396,4 @@ export function useAppSettings() {
     defaults: DEFAULT_APP_SETTINGS,
   } as const;
 }
+

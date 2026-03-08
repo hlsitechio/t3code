@@ -206,10 +206,20 @@ export const checkCodexProviderStatus: Effect.Effect<
 > = Effect.gen(function* () {
   const checkedAt = new Date().toISOString();
 
-  // Probe 1: `codex --version` — is the CLI reachable?
-  const versionProbe = yield* runCodexCommand(["--version"]).pipe(
-    Effect.timeoutOption(DEFAULT_TIMEOUT_MS),
-    Effect.result,
+  const [versionProbe, authProbe] = yield* Effect.all(
+    [
+      // Probe 1: `codex --version` — is the CLI reachable?
+      runCodexCommand(["--version"]).pipe(
+        Effect.timeoutOption(DEFAULT_TIMEOUT_MS),
+        Effect.result,
+      ),
+      // Probe 2: `codex login status` — is the user authenticated?
+      runCodexCommand(["login", "status"]).pipe(
+        Effect.timeoutOption(DEFAULT_TIMEOUT_MS),
+        Effect.result,
+      ),
+    ],
+    { concurrency: "unbounded" },
   );
 
   if (Result.isFailure(versionProbe)) {
@@ -264,11 +274,6 @@ export const checkCodexProviderStatus: Effect.Effect<
     };
   }
 
-  // Probe 2: `codex login status` — is the user authenticated?
-  const authProbe = yield* runCodexCommand(["login", "status"]).pipe(
-    Effect.timeoutOption(DEFAULT_TIMEOUT_MS),
-    Effect.result,
-  );
 
   if (Result.isFailure(authProbe)) {
     const error = authProbe.failure;
@@ -312,9 +317,10 @@ export const checkCodexProviderStatus: Effect.Effect<
 export const ProviderHealthLive = Layer.effect(
   ProviderHealth,
   Effect.gen(function* () {
-    const codexStatus = yield* checkCodexProviderStatus;
+    const status = yield* checkCodexProviderStatus;
     return {
-      getStatuses: Effect.succeed([codexStatus]),
+      getStatuses: Effect.succeed([status]),
     } satisfies ProviderHealthShape;
   }),
 );
+

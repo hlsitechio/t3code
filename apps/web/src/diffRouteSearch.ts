@@ -4,6 +4,8 @@ export interface DiffRouteSearch {
   diff?: "1";
   diffTurnId?: TurnId;
   diffFilePath?: string;
+  browser?: "1";
+  canvas?: "1";
 }
 
 function isDiffOpenValue(value: unknown): boolean {
@@ -25,8 +27,24 @@ export function stripDiffSearchParams<T extends Record<string, unknown>>(
   return rest as Omit<T, "diff" | "diffTurnId" | "diffFilePath">;
 }
 
+export function stripBrowserSearchParams<T extends Record<string, unknown>>(
+  params: T,
+): Omit<T, "browser"> {
+  const { browser: _browser, ...rest } = params;
+  return rest as Omit<T, "browser">;
+}
+
+export function stripCanvasSearchParams<T extends Record<string, unknown>>(
+  params: T,
+): Omit<T, "canvas"> {
+  const { canvas: _canvas, ...rest } = params;
+  return rest as Omit<T, "canvas">;
+}
+
 export function parseDiffRouteSearch(search: Record<string, unknown>): DiffRouteSearch {
   const diff = isDiffOpenValue(search.diff) ? "1" : undefined;
+  const browser = isDiffOpenValue(search.browser) ? "1" : undefined;
+  const canvas = isDiffOpenValue(search.canvas) ? "1" : undefined;
   const diffTurnIdRaw = diff ? normalizeSearchString(search.diffTurnId) : undefined;
   const diffTurnId = diffTurnIdRaw ? TurnId.makeUnsafe(diffTurnIdRaw) : undefined;
   const diffFilePath = diff && diffTurnId ? normalizeSearchString(search.diffFilePath) : undefined;
@@ -35,5 +53,7 @@ export function parseDiffRouteSearch(search: Record<string, unknown>): DiffRoute
     ...(diff ? { diff } : {}),
     ...(diffTurnId ? { diffTurnId } : {}),
     ...(diffFilePath ? { diffFilePath } : {}),
+    ...(browser ? { browser } : {}),
+    ...(canvas ? { canvas } : {}),
   };
 }

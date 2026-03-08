@@ -1,8 +1,10 @@
 import { FitAddon } from "@xterm/addon-fit";
-import { Plus, SquareSplitHorizontal, TerminalSquare, Trash2, XIcon } from "lucide-react";
+import { WebglAddon } from "@xterm/addon-webgl";
+import { MinusIcon, Plus, SquareSplitHorizontal, TerminalSquare, Trash2, XIcon } from "lucide-react";
 import { type ThreadId } from "@t3tools/contracts";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import {
+  memo,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
   useCallback,
@@ -29,6 +31,8 @@ import { readNativeApi } from "~/nativeApi";
 
 const MIN_DRAWER_HEIGHT = 180;
 const MAX_DRAWER_HEIGHT_RATIO = 0.75;
+const TERMINAL_INPUT_FLUSH_MS = 8;
+const TERMINAL_OUTPUT_FLUSH_MS = 8;
 
 function maxDrawerHeight(): number {
   if (typeof window === "undefined") return DEFAULT_THREAD_TERMINAL_HEIGHT;
@@ -157,6 +161,15 @@ function TerminalViewport({
     });
     terminal.loadAddon(fitAddon);
     terminal.open(mount);
+    try {
+      const webglAddon = new WebglAddon();
+      webglAddon.onContextLoss(() => {
+        webglAddon.dispose();
+      });
+      terminal.loadAddon(webglAddon);
+    } catch {
+      // WebGL not available, fall back to default DOM renderer
+    }
     fitAddon.fit();
 
     terminalRef.current = terminal;
@@ -164,10 +177,62 @@ function TerminalViewport({
 
     const api = readNativeApi();
     if (!api) return;
+    let pendingInput = "";
+    let flushInputTimer: number | null = null;
+    let pendingOutput = "";
+    let flushOutputTimer: number | null = null;
+
+    const flushPendingInput = () => {
+      const activeTerminal = terminalRef.current;
+      if (!activeTerminal || pendingInput.length === 0) {
+        flushInputTimer = null;
+        return;
+      }
+      const nextInput = pendingInput;
+      pendingInput = "";
+      flushInputTimer = null;
+      void api.terminal.write({ threadId, terminalId, data: nextInput }).catch((err) =>
+        writeSystemMessage(
+          activeTerminal,
+          err instanceof Error ? err.message : "Terminal write failed",
+        ),
+      );
+    };
+
+    const queueTerminalInput = (data: string) => {
+      pendingInput += data;
+      if (flushInputTimer !== null) {
+        return;
+      }
+      flushInputTimer = window.setTimeout(() => {
+        flushPendingInput();
+      }, TERMINAL_INPUT_FLUSH_MS);
+    };
+    const flushPendingOutput = () => {
+      const activeTerminal = terminalRef.current;
+      if (!activeTerminal || pendingOutput.length === 0) {
+        flushOutputTimer = null;
+        return;
+      }
+      const nextOutput = pendingOutput;
+      pendingOutput = "";
+      flushOutputTimer = null;
+      activeTerminal.write(nextOutput);
+    };
+    const queueTerminalOutput = (data: string) => {
+      pendingOutput += data;
+      if (flushOutputTimer !== null) {
+        return;
+      }
+      flushOutputTimer = window.setTimeout(() => {
+        flushPendingOutput();
+      }, TERMINAL_OUTPUT_FLUSH_MS);
+    };
 
     const sendTerminalInput = async (data: string, fallbackError: string) => {
       const activeTerminal = terminalRef.current;
       if (!activeTerminal) return;
+      flushPendingInput();
       try {
         await api.terminal.write({ threadId, terminalId, data });
       } catch (error) {
@@ -249,14 +314,7 @@ function TerminalViewport({
     });
 
     const inputDisposable = terminal.onData((data) => {
-      void api.terminal
-        .write({ threadId, terminalId, data })
-        .catch((err) =>
-          writeSystemMessage(
-            terminal,
-            err instanceof Error ? err.message : "Terminal write failed",
-          ),
-        );
+      queueTerminalInput(data);
     });
 
     const themeObserver = new MutationObserver(() => {
@@ -309,11 +367,12 @@ function TerminalViewport({
       if (!activeTerminal) return;
 
       if (event.type === "output") {
-        activeTerminal.write(event.data);
+        queueTerminalOutput(event.data);
         return;
       }
 
       if (event.type === "started" || event.type === "restarted") {
+        flushPendingOutput();
         hasHandledExitRef.current = false;
         activeTerminal.write("\u001bc");
         if (event.snapshot.history.length > 0) {
@@ -323,6 +382,7 @@ function TerminalViewport({
       }
 
       if (event.type === "cleared") {
+        flushPendingOutput();
         activeTerminal.clear();
         activeTerminal.write("\u001bc");
         return;
@@ -380,6 +440,16 @@ function TerminalViewport({
 
     return () => {
       disposed = true;
+      if (flushInputTimer !== null) {
+        window.clearTimeout(flushInputTimer);
+        flushInputTimer = null;
+      }
+      if (flushOutputTimer !== null) {
+        window.clearTimeout(flushOutputTimer);
+        flushOutputTimer = null;
+      }
+      pendingInput = "";
+      pendingOutput = "";
       window.clearTimeout(fitTimer);
       unsubscribe();
       inputDisposable.dispose();
@@ -430,7 +500,12 @@ function TerminalViewport({
       window.cancelAnimationFrame(frame);
     };
   }, [drawerHeight, resizeEpoch, terminalId, threadId]);
-  return <div ref={containerRef} className="h-full w-full overflow-hidden rounded-[4px]" />;
+  return (
+    <div
+      ref={containerRef}
+      className="h-full w-full overflow-hidden rounded-[4px] transform-gpu [will-change:transform]"
+    />
+  );
 }
 
 interface ThreadTerminalDrawerProps {
@@ -450,6 +525,7 @@ interface ThreadTerminalDrawerProps {
   closeShortcutLabel?: string | undefined;
   onActiveTerminalChange: (terminalId: string) => void;
   onCloseTerminal: (terminalId: string) => void;
+  onToggleTerminal: () => void;
   onHeightChange: (height: number) => void;
 }
 
@@ -482,7 +558,7 @@ function TerminalActionButton({ label, className, onClick, children }: TerminalA
   );
 }
 
-export default function ThreadTerminalDrawer({
+const ThreadTerminalDrawer = memo(function ThreadTerminalDrawer({
   threadId,
   cwd,
   runtimeEnv,
@@ -499,6 +575,7 @@ export default function ThreadTerminalDrawer({
   closeShortcutLabel,
   onActiveTerminalChange,
   onCloseTerminal,
+  onToggleTerminal,
   onHeightChange,
 }: ThreadTerminalDrawerProps) {
   const [drawerHeight, setDrawerHeight] = useState(() => clampDrawerHeight(height));
@@ -626,6 +703,7 @@ export default function ThreadTerminalDrawer({
   const closeTerminalActionLabel = closeShortcutLabel
     ? `Close Terminal (${closeShortcutLabel})`
     : "Close Terminal";
+  const minimizeTerminalActionLabel = "Minimize terminal";
   const onSplitTerminalAction = useCallback(() => {
     if (hasReachedTerminalLimit) return;
     onSplitTerminal();
@@ -768,6 +846,14 @@ export default function ThreadTerminalDrawer({
             <div className="h-4 w-px bg-border/80" />
             <TerminalActionButton
               className="p-1 text-foreground/90 transition-colors hover:bg-accent"
+              onClick={onToggleTerminal}
+              label={minimizeTerminalActionLabel}
+            >
+              <MinusIcon className="size-3.25" />
+            </TerminalActionButton>
+            <div className="h-4 w-px bg-border/80" />
+            <TerminalActionButton
+              className="p-1 text-foreground/90 transition-colors hover:bg-accent"
               onClick={() => onCloseTerminal(resolvedActiveTerminalId)}
               label={closeTerminalActionLabel}
             >
@@ -858,6 +944,13 @@ export default function ThreadTerminalDrawer({
                     label={newTerminalActionLabel}
                   >
                     <Plus className="size-3.25" />
+                  </TerminalActionButton>
+                  <TerminalActionButton
+                    className="inline-flex h-full items-center border-l border-border/70 px-1 text-foreground/90 transition-colors hover:bg-accent/70"
+                    onClick={onToggleTerminal}
+                    label={minimizeTerminalActionLabel}
+                  >
+                    <MinusIcon className="size-3.25" />
                   </TerminalActionButton>
                   <TerminalActionButton
                     className="inline-flex h-full items-center border-l border-border/70 px-1 text-foreground/90 transition-colors hover:bg-accent/70"
@@ -965,4 +1058,6 @@ export default function ThreadTerminalDrawer({
       </div>
     </aside>
   );
-}
+});
+
+export default ThreadTerminalDrawer;

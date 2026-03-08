@@ -1,13 +1,33 @@
 import * as ChildProcess from "node:child_process";
 import * as Crypto from "node:crypto";
 import * as FS from "node:fs";
+import * as Http from "node:http";
 import * as OS from "node:os";
 import * as Path from "node:path";
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, shell } from "electron";
+import {
+  app,
+  BrowserView,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  nativeImage,
+  protocol,
+  shell,
+} from "electron";
 import type { MenuItemConstructorOptions } from "electron";
 import * as Effect from "effect/Effect";
-import type { DesktopUpdateActionResult, DesktopUpdateState } from "@t3tools/contracts";
+import type {
+  DesktopBrowserActInput,
+  DesktopBrowserActionResult,
+  DesktopBrowserExtractResult,
+  DesktopBrowserObserveResult,
+  DesktopBrowserViewBounds,
+  DesktopBrowserViewState,
+  DesktopUpdateActionResult,
+  DesktopUpdateState,
+} from "@t3tools/contracts";
 import { autoUpdater } from "electron-updater";
 
 import type { ContextMenuItem } from "@t3tools/contracts";
@@ -31,6 +51,8 @@ import {
   reduceDesktopUpdateStateOnNoUpdate,
   reduceDesktopUpdateStateOnUpdateAvailable,
 } from "./updateMachine";
+import { captureBrowserViewScreenshot } from "./browserCdp";
+import { actOnBrowserView, extractBrowserView, observeBrowserView } from "./browserOperator";
 
 fixPath();
 
@@ -43,6 +65,18 @@ const UPDATE_STATE_CHANNEL = "desktop:update-state";
 const UPDATE_GET_STATE_CHANNEL = "desktop:update-get-state";
 const UPDATE_DOWNLOAD_CHANNEL = "desktop:update-download";
 const UPDATE_INSTALL_CHANNEL = "desktop:update-install";
+const BROWSER_ATTACH_CHANNEL = "desktop:browser-attach";
+const BROWSER_SET_VISIBLE_CHANNEL = "desktop:browser-set-visible";
+const BROWSER_NAVIGATE_CHANNEL = "desktop:browser-navigate";
+const BROWSER_GO_BACK_CHANNEL = "desktop:browser-go-back";
+const BROWSER_GO_FORWARD_CHANNEL = "desktop:browser-go-forward";
+const BROWSER_RELOAD_CHANNEL = "desktop:browser-reload";
+const BROWSER_GET_STATE_CHANNEL = "desktop:browser-get-state";
+const BROWSER_OBSERVE_CHANNEL = "desktop:browser-observe";
+const BROWSER_ACT_CHANNEL = "desktop:browser-act";
+const BROWSER_EXTRACT_CHANNEL = "desktop:browser-extract";
+const BROWSER_WAIT_CHANNEL = "desktop:browser-wait";
+const BROWSER_STATE_CHANNEL = "desktop:browser-state";
 const STATE_DIR =
   process.env.T3CODE_STATE_DIR?.trim() || Path.join(OS.homedir(), ".t3", "userdata");
 const DESKTOP_SCHEME = "t3";
@@ -60,6 +94,9 @@ const AUTO_UPDATE_STARTUP_DELAY_MS = 15_000;
 const AUTO_UPDATE_POLL_INTERVAL_MS = 4 * 60 * 60 * 1000;
 const DESKTOP_UPDATE_CHANNEL = "latest";
 const DESKTOP_UPDATE_ALLOW_PRERELEASE = false;
+const DESKTOP_OPERATOR_HOST = "127.0.0.1";
+const DESKTOP_OPERATOR_PATH = "/lab-browser-operator";
+const OPEN_DEVTOOLS_IN_DEV = process.env.T3CODE_OPEN_DEVTOOLS === "1";
 
 type DesktopUpdateErrorContext = DesktopUpdateState["errorContext"];
 
@@ -229,6 +266,37 @@ let updateCheckInFlight = false;
 let updateDownloadInFlight = false;
 let updaterConfigured = false;
 let updateState: DesktopUpdateState = initialUpdateState();
+let activeBrowserThreadId: string | null = null;
+let operatorApiServer: Http.Server | null = null;
+let operatorApiUrl = "";
+let operatorApiToken = "";
+
+type DesktopBrowserSession = {
+  threadId: string;
+  view: BrowserView;
+  bounds: DesktopBrowserViewBounds;
+  isVisible: boolean;
+  state: DesktopBrowserViewState;
+};
+
+const browserSessions = new Map<string, DesktopBrowserSession>();
+
+interface DesktopOperatorObserveResponse {
+  state: DesktopBrowserViewState;
+  observation: DesktopBrowserObserveResult;
+  screenshotBase64: string | null;
+}
+
+interface DesktopOperatorExtractResponse {
+  state: DesktopBrowserViewState;
+  extraction: DesktopBrowserExtractResult;
+}
+
+type DesktopOperatorRpcResult =
+  | DesktopBrowserViewState
+  | DesktopBrowserActionResult
+  | DesktopOperatorObserveResponse
+  | DesktopOperatorExtractResponse;
 
 function resolveUpdaterErrorContext(): DesktopUpdateErrorContext {
   if (updateDownloadInFlight) return "download";
@@ -630,6 +698,517 @@ function shouldEnableAutoUpdates(): boolean {
   );
 }
 
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function sanitizeBrowserBounds(bounds: DesktopBrowserViewBounds | undefined): DesktopBrowserViewBounds {
+  if (!bounds) {
+    return { x: 0, y: 0, width: 0, height: 0 };
+  }
+  return {
+    x: Math.max(0, Math.floor(bounds.x)),
+    y: Math.max(0, Math.floor(bounds.y)),
+    width: Math.max(0, Math.floor(bounds.width)),
+    height: Math.max(0, Math.floor(bounds.height)),
+  };
+}
+
+function normalizeBrowserUrl(rawUrl: string): string {
+  const trimmed = rawUrl.trim();
+  if (trimmed.length === 0) {
+    throw new Error("Browser URL cannot be empty.");
+  }
+  if (/\s/.test(trimmed)) {
+    return `https://duckduckgo.com/?q=${encodeURIComponent(trimmed)}`;
+  }
+  if (
+    !trimmed.includes("://") &&
+    !trimmed.includes(".") &&
+    trimmed !== "localhost" &&
+    !/^\d{1,3}(\.\d{1,3}){3}$/.test(trimmed)
+  ) {
+    return `https://duckduckgo.com/?q=${encodeURIComponent(trimmed)}`;
+  }
+  const withProtocol =
+    trimmed.startsWith("http://") || trimmed.startsWith("https://") ? trimmed : `https://${trimmed}`;
+  const parsed = new URL(withProtocol);
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Only http and https URLs are supported.");
+  }
+  return parsed.toString();
+}
+
+function isRecoverableBrowserLoadError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = "code" in error && typeof error.code === "string" ? error.code : "";
+  return (
+    code === "ERR_ABORTED" ||
+    code === "ERR_NAME_NOT_RESOLVED" ||
+    code === "ERR_INTERNET_DISCONNECTED" ||
+    code === "ERR_CONNECTION_REFUSED" ||
+    code === "ERR_CONNECTION_TIMED_OUT"
+  );
+}
+
+function createEmptyBrowserState(threadId: string): DesktopBrowserViewState {
+  return {
+    threadId,
+    url: null,
+    title: null,
+    loading: false,
+    canGoBack: false,
+    canGoForward: false,
+    isVisible: false,
+    lastUpdatedAt: nowIso(),
+  };
+}
+
+function emitBrowserState(state: DesktopBrowserViewState): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (window.isDestroyed()) continue;
+    window.webContents.send(BROWSER_STATE_CHANNEL, state);
+  }
+}
+
+function readBrowserState(session: DesktopBrowserSession): DesktopBrowserViewState {
+  const webContents = session.view.webContents;
+  if (webContents.isDestroyed()) {
+    return {
+      threadId: session.threadId,
+      url: session.state.url,
+      title: session.state.title,
+      loading: false,
+      canGoBack: false,
+      canGoForward: false,
+      isVisible: session.isVisible,
+      lastUpdatedAt: nowIso(),
+    };
+  }
+  const url = webContents.getURL();
+  const title = webContents.getTitle();
+  return {
+    threadId: session.threadId,
+    url: url.length > 0 ? url : null,
+    title: title.length > 0 ? title : null,
+    loading: webContents.isLoading(),
+    canGoBack: webContents.navigationHistory.canGoBack(),
+    canGoForward: webContents.navigationHistory.canGoForward(),
+    isVisible: session.isVisible,
+    lastUpdatedAt: nowIso(),
+  };
+}
+
+function updateBrowserSessionState(session: DesktopBrowserSession): DesktopBrowserViewState {
+  const nextState = readBrowserState(session);
+  session.state = nextState;
+  emitBrowserState(nextState);
+  return nextState;
+}
+
+function attachBrowserSessionToWindow(threadId: string | null): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    activeBrowserThreadId = threadId;
+    return;
+  }
+
+  if (activeBrowserThreadId === threadId && threadId !== null) {
+    const activeSession = browserSessions.get(threadId);
+    if (activeSession && !activeSession.view.webContents.isDestroyed()) {
+      updateBrowserSessionState(activeSession);
+      return;
+    }
+  }
+
+  const currentSession =
+    activeBrowserThreadId !== null ? browserSessions.get(activeBrowserThreadId) : undefined;
+  if (currentSession && !currentSession.view.webContents.isDestroyed()) {
+    try {
+      mainWindow.removeBrowserView(currentSession.view);
+    } catch {
+      // ignore stale detach failures
+    }
+  }
+
+  activeBrowserThreadId = threadId;
+  if (threadId === null) {
+    return;
+  }
+
+  const nextSession = browserSessions.get(threadId);
+  if (!nextSession) {
+    return;
+  }
+  if (nextSession.view.webContents.isDestroyed()) {
+    browserSessions.delete(threadId);
+    return;
+  }
+
+  mainWindow.addBrowserView(nextSession.view);
+  const { x, y, width, height } = nextSession.bounds;
+  nextSession.view.setBounds({ x, y, width, height });
+  nextSession.view.setAutoResize({ width: false, height: false });
+  updateBrowserSessionState(nextSession);
+}
+
+function ensureBrowserSession(threadId: string): DesktopBrowserSession {
+  const existing = browserSessions.get(threadId);
+  if (existing) {
+    return existing;
+  }
+
+  const view = new BrowserView({
+    webPreferences: {
+      sandbox: true,
+      partition: `persist:t3-browser-${threadId}`,
+    },
+  });
+  view.webContents.setWindowOpenHandler(({ url }) => {
+    void shell.openExternal(url);
+    return { action: "deny" };
+  });
+  const session: DesktopBrowserSession = {
+    threadId,
+    view,
+    bounds: { x: 0, y: 0, width: 0, height: 0 },
+    isVisible: false,
+    state: createEmptyBrowserState(threadId),
+  };
+
+  const sync = () => {
+    updateBrowserSessionState(session);
+  };
+
+  view.webContents.on("did-start-loading", sync);
+  view.webContents.on("did-stop-loading", sync);
+  view.webContents.on("did-navigate", sync);
+  view.webContents.on("did-navigate-in-page", sync);
+  view.webContents.on("page-title-updated", sync);
+  view.webContents.on("destroyed", () => {
+    browserSessions.delete(threadId);
+    if (activeBrowserThreadId === threadId) {
+      activeBrowserThreadId = null;
+    }
+  });
+
+  browserSessions.set(threadId, session);
+  return session;
+}
+
+async function attachBrowserThread(threadId: string): Promise<DesktopBrowserViewState> {
+  const session = ensureBrowserSession(threadId);
+  if (session.state.url === null) {
+    try {
+      await session.view.webContents.loadURL("about:blank");
+    } catch (error) {
+      if (!isRecoverableBrowserLoadError(error)) {
+        throw error;
+      }
+    }
+  }
+  attachBrowserSessionToWindow(threadId);
+  return updateBrowserSessionState(session);
+}
+
+function setBrowserVisibility(
+  threadId: string,
+  visible: boolean,
+  bounds?: DesktopBrowserViewBounds,
+): DesktopBrowserViewState {
+  const session = ensureBrowserSession(threadId);
+  session.isVisible = visible;
+  session.bounds = sanitizeBrowserBounds(bounds ?? session.bounds);
+
+  if (!visible) {
+    if (activeBrowserThreadId === threadId) {
+      attachBrowserSessionToWindow(null);
+    }
+    return updateBrowserSessionState(session);
+  }
+
+  if (session.view.webContents.isDestroyed()) {
+    browserSessions.delete(threadId);
+    return createEmptyBrowserState(threadId);
+  }
+  attachBrowserSessionToWindow(threadId);
+  if (session.bounds.width > 0 && session.bounds.height > 0) {
+    session.view.setBounds(session.bounds);
+  }
+  return updateBrowserSessionState(session);
+}
+
+async function navigateBrowser(threadId: string, rawUrl: string): Promise<DesktopBrowserViewState> {
+  const session = ensureBrowserSession(threadId);
+  const normalizedUrl = normalizeBrowserUrl(rawUrl);
+  try {
+    await session.view.webContents.loadURL(normalizedUrl);
+  } catch (error) {
+    if (!isRecoverableBrowserLoadError(error)) {
+      throw error;
+    }
+  }
+  return updateBrowserSessionState(session);
+}
+
+async function observeBrowser(
+  threadId: string,
+  target?: string,
+): Promise<DesktopBrowserObserveResult> {
+  const session = ensureBrowserSession(threadId);
+  return observeBrowserView(session.view, threadId, target);
+}
+
+async function actOnBrowser(
+  threadId: string,
+  action: DesktopBrowserActInput,
+): Promise<DesktopBrowserActionResult> {
+  const session = ensureBrowserSession(threadId);
+  const result = await actOnBrowserView(
+    session.view,
+    threadId,
+    action,
+    updateBrowserSessionState(session),
+  );
+  return {
+    ...result,
+    state: updateBrowserSessionState(session),
+  };
+}
+
+async function extractFromBrowser(
+  threadId: string,
+  query?: string,
+): Promise<DesktopBrowserExtractResult> {
+  const session = ensureBrowserSession(threadId);
+  return extractBrowserView(session.view, threadId, query);
+}
+
+async function observeBrowserForOperator(
+  threadId: string,
+  target?: string,
+): Promise<DesktopOperatorObserveResponse> {
+  const session = ensureBrowserSession(threadId);
+  const observation = await observeBrowserView(session.view, threadId, target);
+  const screenshotBase64 = await captureBrowserViewScreenshot(session.view);
+  return {
+    state: updateBrowserSessionState(session),
+    observation,
+    screenshotBase64,
+  };
+}
+
+async function extractBrowserForOperator(
+  threadId: string,
+  query?: string,
+): Promise<DesktopOperatorExtractResponse> {
+  const session = ensureBrowserSession(threadId);
+  const extraction = await extractBrowserView(session.view, threadId, query);
+  return {
+    state: updateBrowserSessionState(session),
+    extraction,
+  };
+}
+
+async function waitForBrowser(
+  threadId: string,
+  durationMs: number,
+): Promise<DesktopBrowserViewState> {
+  const session = ensureBrowserSession(threadId);
+  const safeDuration = Math.max(0, Math.min(30_000, Math.floor(durationMs)));
+  await new Promise((resolve) => setTimeout(resolve, safeDuration));
+  return updateBrowserSessionState(session);
+}
+
+function browserBack(threadId: string): DesktopBrowserViewState {
+  const session = ensureBrowserSession(threadId);
+  if (session.view.webContents.navigationHistory.canGoBack()) {
+    session.view.webContents.navigationHistory.goBack();
+  }
+  return updateBrowserSessionState(session);
+}
+
+function browserForward(threadId: string): DesktopBrowserViewState {
+  const session = ensureBrowserSession(threadId);
+  if (session.view.webContents.navigationHistory.canGoForward()) {
+    session.view.webContents.navigationHistory.goForward();
+  }
+  return updateBrowserSessionState(session);
+}
+
+function browserReload(threadId: string): DesktopBrowserViewState {
+  const session = ensureBrowserSession(threadId);
+  session.view.webContents.reload();
+  return updateBrowserSessionState(session);
+}
+
+async function readJsonRequestBody(request: Http.IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  if (chunks.length === 0) {
+    return null;
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+function writeJsonResponse(
+  response: Http.ServerResponse,
+  statusCode: number,
+  body: Record<string, unknown>,
+): void {
+  const payload = JSON.stringify(body);
+  response.writeHead(statusCode, {
+    "content-type": "application/json; charset=utf-8",
+    "content-length": Buffer.byteLength(payload),
+  });
+  response.end(payload);
+}
+
+function operatorUnauthorized(response: Http.ServerResponse): void {
+  writeJsonResponse(response, 401, {
+    ok: false,
+    error: "Unauthorized operator request.",
+  });
+}
+
+function isAuthorizedOperatorRequest(request: Http.IncomingMessage): boolean {
+  const authorization = request.headers.authorization;
+  return authorization === `Bearer ${operatorApiToken}`;
+}
+
+async function handleOperatorRpc(method: string, params: Record<string, unknown>): Promise<DesktopOperatorRpcResult> {
+  const threadIdValue = params.threadId;
+  const threadId =
+    typeof threadIdValue === "string" && threadIdValue.trim().length > 0
+      ? threadIdValue.trim()
+      : null;
+  if (!threadId) {
+    throw new Error("Operator request requires a threadId.");
+  }
+
+  switch (method) {
+    case "browser.attach":
+      return attachBrowserThread(threadId);
+    case "browser.getState":
+      return updateBrowserSessionState(ensureBrowserSession(threadId));
+    case "browser.navigate": {
+      const url = params.url;
+      if (typeof url !== "string") {
+        throw new Error("Operator browser.navigate requires a URL.");
+      }
+      return navigateBrowser(threadId, url);
+    }
+    case "browser.goBack":
+      return browserBack(threadId);
+    case "browser.goForward":
+      return browserForward(threadId);
+    case "browser.reload":
+      return browserReload(threadId);
+    case "browser.observe":
+      return observeBrowserForOperator(
+        threadId,
+        typeof params.target === "string" ? params.target : undefined,
+      );
+    case "browser.extract":
+      return extractBrowserForOperator(
+        threadId,
+        typeof params.query === "string" ? params.query : undefined,
+      );
+    case "browser.wait": {
+      const durationMs = params.durationMs;
+      if (typeof durationMs !== "number" || !Number.isFinite(durationMs)) {
+        throw new Error("Operator browser.wait requires a finite durationMs.");
+      }
+      return waitForBrowser(threadId, durationMs);
+    }
+    case "browser.act": {
+      const action = params.action;
+      if (!action || typeof action !== "object") {
+        throw new Error("Operator browser.act requires an action payload.");
+      }
+      return actOnBrowser(threadId, action as DesktopBrowserActInput);
+    }
+    default:
+      throw new Error(`Unsupported operator method: ${method}`);
+  }
+}
+
+async function startOperatorApiServer(): Promise<void> {
+  if (operatorApiServer) {
+    return;
+  }
+
+  operatorApiToken = Crypto.randomBytes(24).toString("hex");
+  const server = Http.createServer((request, response) => {
+    void (async () => {
+      try {
+        if (request.method !== "POST" || request.url !== DESKTOP_OPERATOR_PATH) {
+          writeJsonResponse(response, 404, { ok: false, error: "Not found." });
+          return;
+        }
+        if (!isAuthorizedOperatorRequest(request)) {
+          operatorUnauthorized(response);
+          return;
+        }
+        const body = await readJsonRequestBody(request);
+        if (!body || typeof body !== "object") {
+          writeJsonResponse(response, 400, { ok: false, error: "Invalid operator request body." });
+          return;
+        }
+
+        const method = (body as { method?: unknown }).method;
+        const params = (body as { params?: unknown }).params;
+        if (typeof method !== "string") {
+          writeJsonResponse(response, 400, { ok: false, error: "Missing operator method." });
+          return;
+        }
+
+        const result = await handleOperatorRpc(
+          method,
+          params && typeof params === "object" ? (params as Record<string, unknown>) : {},
+        );
+        writeJsonResponse(response, 200, { ok: true, result });
+      } catch (error) {
+        writeJsonResponse(response, 500, {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })();
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, DESKTOP_OPERATOR_HOST, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    server.close();
+    throw new Error("Failed to resolve operator API address.");
+  }
+
+  operatorApiServer = server;
+  operatorApiUrl = `http://${DESKTOP_OPERATOR_HOST}:${address.port}${DESKTOP_OPERATOR_PATH}`;
+}
+
+async function stopOperatorApiServer(): Promise<void> {
+  const server = operatorApiServer;
+  operatorApiServer = null;
+  operatorApiUrl = "";
+  operatorApiToken = "";
+  if (!server) {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    server.close(() => resolve());
+  });
+}
+
 async function checkForUpdates(reason: string): Promise<void> {
   if (isQuitting || !updaterConfigured || updateCheckInFlight) return;
   if (updateState.status === "downloading" || updateState.status === "downloaded") {
@@ -800,6 +1379,8 @@ function backendEnv(): NodeJS.ProcessEnv {
     T3CODE_PORT: String(backendPort),
     T3CODE_STATE_DIR: STATE_DIR,
     T3CODE_AUTH_TOKEN: backendAuthToken,
+    ...(operatorApiUrl ? { T3CODE_DESKTOP_OPERATOR_URL: operatorApiUrl } : {}),
+    ...(operatorApiToken ? { T3CODE_DESKTOP_OPERATOR_TOKEN: operatorApiToken } : {}),
   };
 }
 
@@ -892,6 +1473,14 @@ function stopBackend(): void {
       }
     }, 2_000).unref();
   }
+}
+
+function destroyBrowserSessions(): void {
+  attachBrowserSessionToWindow(null);
+  for (const session of browserSessions.values()) {
+    session.view.webContents.close({ waitForBeforeUnload: false });
+  }
+  browserSessions.clear();
 }
 
 async function stopBackendAndWaitForExit(timeoutMs = 5_000): Promise<void> {
@@ -1085,6 +1674,120 @@ function registerIpcHandlers(): void {
       state: updateState,
     } satisfies DesktopUpdateActionResult;
   });
+
+  ipcMain.removeHandler(BROWSER_ATTACH_CHANNEL);
+  ipcMain.handle(BROWSER_ATTACH_CHANNEL, async (_event, threadId: unknown) => {
+    if (typeof threadId !== "string" || threadId.trim().length === 0) {
+      throw new Error("Invalid browser thread id.");
+    }
+    return attachBrowserThread(threadId);
+  });
+
+  ipcMain.removeHandler(BROWSER_SET_VISIBLE_CHANNEL);
+  ipcMain.handle(
+    BROWSER_SET_VISIBLE_CHANNEL,
+    async (_event, threadId: unknown, visible: unknown, bounds: unknown) => {
+      if (typeof threadId !== "string" || threadId.trim().length === 0) {
+        throw new Error("Invalid browser thread id.");
+      }
+      if (typeof visible !== "boolean") {
+        throw new Error("Invalid browser visibility value.");
+      }
+      const safeBounds =
+        bounds && typeof bounds === "object"
+          ? sanitizeBrowserBounds(bounds as DesktopBrowserViewBounds)
+          : undefined;
+      return setBrowserVisibility(threadId, visible, safeBounds);
+    },
+  );
+
+  ipcMain.removeHandler(BROWSER_NAVIGATE_CHANNEL);
+  ipcMain.handle(BROWSER_NAVIGATE_CHANNEL, async (_event, threadId: unknown, url: unknown) => {
+    if (typeof threadId !== "string" || threadId.trim().length === 0) {
+      throw new Error("Invalid browser thread id.");
+    }
+    if (typeof url !== "string") {
+      throw new Error("Invalid browser URL.");
+    }
+    return navigateBrowser(threadId, url);
+  });
+
+  ipcMain.removeHandler(BROWSER_GO_BACK_CHANNEL);
+  ipcMain.handle(BROWSER_GO_BACK_CHANNEL, async (_event, threadId: unknown) => {
+    if (typeof threadId !== "string" || threadId.trim().length === 0) {
+      throw new Error("Invalid browser thread id.");
+    }
+    return browserBack(threadId);
+  });
+
+  ipcMain.removeHandler(BROWSER_GO_FORWARD_CHANNEL);
+  ipcMain.handle(BROWSER_GO_FORWARD_CHANNEL, async (_event, threadId: unknown) => {
+    if (typeof threadId !== "string" || threadId.trim().length === 0) {
+      throw new Error("Invalid browser thread id.");
+    }
+    return browserForward(threadId);
+  });
+
+  ipcMain.removeHandler(BROWSER_RELOAD_CHANNEL);
+  ipcMain.handle(BROWSER_RELOAD_CHANNEL, async (_event, threadId: unknown) => {
+    if (typeof threadId !== "string" || threadId.trim().length === 0) {
+      throw new Error("Invalid browser thread id.");
+    }
+    return browserReload(threadId);
+  });
+
+  ipcMain.removeHandler(BROWSER_GET_STATE_CHANNEL);
+  ipcMain.handle(BROWSER_GET_STATE_CHANNEL, async (_event, threadId: unknown) => {
+    if (typeof threadId !== "string" || threadId.trim().length === 0) {
+      throw new Error("Invalid browser thread id.");
+    }
+    const session = ensureBrowserSession(threadId);
+    return updateBrowserSessionState(session);
+  });
+
+  ipcMain.removeHandler(BROWSER_OBSERVE_CHANNEL);
+  ipcMain.handle(BROWSER_OBSERVE_CHANNEL, async (_event, threadId: unknown, target: unknown) => {
+    if (typeof threadId !== "string" || threadId.trim().length === 0) {
+      throw new Error("Invalid browser thread id.");
+    }
+    if (target !== undefined && typeof target !== "string") {
+      throw new Error("Invalid browser observe target.");
+    }
+    return observeBrowser(threadId, typeof target === "string" ? target : undefined);
+  });
+
+  ipcMain.removeHandler(BROWSER_ACT_CHANNEL);
+  ipcMain.handle(BROWSER_ACT_CHANNEL, async (_event, threadId: unknown, action: unknown) => {
+    if (typeof threadId !== "string" || threadId.trim().length === 0) {
+      throw new Error("Invalid browser thread id.");
+    }
+    if (!action || typeof action !== "object") {
+      throw new Error("Invalid browser action.");
+    }
+    return actOnBrowser(threadId, action as DesktopBrowserActInput);
+  });
+
+  ipcMain.removeHandler(BROWSER_EXTRACT_CHANNEL);
+  ipcMain.handle(BROWSER_EXTRACT_CHANNEL, async (_event, threadId: unknown, query: unknown) => {
+    if (typeof threadId !== "string" || threadId.trim().length === 0) {
+      throw new Error("Invalid browser thread id.");
+    }
+    if (query !== undefined && typeof query !== "string") {
+      throw new Error("Invalid browser extract query.");
+    }
+    return extractFromBrowser(threadId, typeof query === "string" ? query : undefined);
+  });
+
+  ipcMain.removeHandler(BROWSER_WAIT_CHANNEL);
+  ipcMain.handle(BROWSER_WAIT_CHANNEL, async (_event, threadId: unknown, durationMs: unknown) => {
+    if (typeof threadId !== "string" || threadId.trim().length === 0) {
+      throw new Error("Invalid browser thread id.");
+    }
+    if (typeof durationMs !== "number" || !Number.isFinite(durationMs)) {
+      throw new Error("Invalid browser wait duration.");
+    }
+    return waitForBrowser(threadId, durationMs);
+  });
 }
 
 function getIconOption(): { icon: string } | Record<string, never> {
@@ -1094,6 +1797,94 @@ function getIconOption(): { icon: string } | Record<string, never> {
   return iconPath ? { icon: iconPath } : {};
 }
 
+function desktopBootScreenDataUrl(): string {
+  const html = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <title>${APP_DISPLAY_NAME}</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Segoe UI", Inter, sans-serif;
+        background:
+          radial-gradient(44rem 16rem at top, rgba(59, 130, 246, 0.18), transparent),
+          linear-gradient(145deg, #050505 0%, #0a0a0c 52%, #050505 100%);
+        color: rgba(255, 255, 255, 0.96);
+        display: grid;
+        place-items: center;
+      }
+      .panel {
+        width: min(620px, calc(100vw - 48px));
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 28px;
+        background: rgba(12, 12, 16, 0.82);
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+        backdrop-filter: blur(18px);
+        padding: 28px;
+      }
+      .eyebrow {
+        font-size: 11px;
+        letter-spacing: 0.24em;
+        text-transform: uppercase;
+        color: rgba(255, 255, 255, 0.45);
+        font-weight: 700;
+      }
+      h1 {
+        margin: 14px 0 0;
+        font-size: clamp(32px, 5vw, 48px);
+        line-height: 1.02;
+      }
+      p {
+        margin: 18px 0 0;
+        color: rgba(255, 255, 255, 0.62);
+        font-size: 15px;
+        line-height: 1.8;
+      }
+      .progress {
+        margin-top: 28px;
+        height: 8px;
+        border-radius: 999px;
+        overflow: hidden;
+        background: rgba(255, 255, 255, 0.08);
+      }
+      .progress > div {
+        height: 100%;
+        width: 32%;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.82);
+        animation: pulse 1.2s ease-in-out infinite alternate;
+      }
+      @keyframes pulse {
+        from { transform: translateX(0); opacity: 0.55; }
+        to { transform: translateX(180%); opacity: 1; }
+      }
+    </style>
+  </head>
+  <body>
+    <section class="panel">
+      <div class="eyebrow">Desktop Shell</div>
+      <h1>Opening ${APP_DISPLAY_NAME}</h1>
+      <p>Starting the local server, restoring workspace state, and preparing Codex, terminal, Lab, and Canvas.</p>
+      <div class="progress"><div></div></div>
+    </section>
+  </body>
+</html>`;
+
+  return `data:text/html;charset=UTF-8,${encodeURIComponent(html)}`;
+}
+
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
     width: 1100,
@@ -1101,6 +1892,7 @@ function createWindow(): BrowserWindow {
     minWidth: 840,
     minHeight: 620,
     show: false,
+    backgroundColor: "#050505",
     autoHideMenuBar: true,
     ...getIconOption(),
     title: APP_DISPLAY_NAME,
@@ -1114,25 +1906,107 @@ function createWindow(): BrowserWindow {
     },
   });
 
-  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  const appUrl = isDevelopment
+    ? (process.env.VITE_DEV_SERVER_URL as string)
+    : `${DESKTOP_SCHEME}://app/index.html`;
+  let rendererRequested = false;
+
+  const requestRendererLoad = () => {
+    if (rendererRequested) {
+      return;
+    }
+    rendererRequested = true;
+    void window.loadURL(appUrl);
+  };
+
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      const parsed = new URL(url);
+      const hostname = parsed.hostname.toLowerCase();
+      const isHttps = parsed.protocol === "https:";
+      const isAllowedAuthHost =
+        hostname === "accounts.google.com" ||
+        hostname === "github.com" ||
+        hostname.endsWith(".github.com") ||
+        hostname.endsWith(".clerk.accounts.dev") ||
+        hostname.endsWith(".clerk.com");
+
+      if (isHttps && isAllowedAuthHost) {
+        return {
+          action: "allow",
+          overrideBrowserWindowOptions: {
+            width: 520,
+            height: 760,
+            minWidth: 420,
+            minHeight: 620,
+            autoHideMenuBar: true,
+            titleBarStyle: "default",
+            backgroundColor: "#050505",
+            modal: false,
+            webPreferences: {
+              sandbox: true,
+              contextIsolation: true,
+              nodeIntegration: false,
+            },
+          },
+        };
+      }
+    } catch {
+      if (url === "about:blank") {
+        return {
+          action: "allow",
+          overrideBrowserWindowOptions: {
+            width: 520,
+            height: 760,
+            minWidth: 420,
+            minHeight: 620,
+            autoHideMenuBar: true,
+            title: `${APP_DISPLAY_NAME} Auth`,
+            titleBarStyle: "default",
+            backgroundColor: "#050505",
+            modal: false,
+            webPreferences: {
+              sandbox: true,
+              contextIsolation: true,
+              nodeIntegration: false,
+            },
+          },
+        };
+      }
+    }
+
+    return { action: "deny" };
+  });
   window.on("page-title-updated", (event) => {
     event.preventDefault();
     window.setTitle(APP_DISPLAY_NAME);
   });
   window.webContents.on("did-finish-load", () => {
+    const currentUrl = window.webContents.getURL();
+
+    if (currentUrl.startsWith("data:text/html")) {
+      window.setTitle(APP_DISPLAY_NAME);
+      if (!window.isVisible()) {
+        window.show();
+      }
+      requestRendererLoad();
+      return;
+    }
+
     window.setTitle(APP_DISPLAY_NAME);
     emitUpdateState();
-  });
-  window.once("ready-to-show", () => {
-    window.show();
+    if (activeBrowserThreadId) {
+      attachBrowserSessionToWindow(activeBrowserThreadId);
+    }
+    if (!window.isVisible()) {
+      window.show();
+    }
+    if (isDevelopment && OPEN_DEVTOOLS_IN_DEV) {
+      window.webContents.openDevTools({ mode: "detach" });
+    }
   });
 
-  if (isDevelopment) {
-    void window.loadURL(process.env.VITE_DEV_SERVER_URL as string);
-    window.webContents.openDevTools({ mode: "detach" });
-  } else {
-    void window.loadURL(`${DESKTOP_SCHEME}://app/index.html`);
-  }
+  void window.loadURL(desktopBootScreenDataUrl());
 
   window.on("closed", () => {
     if (mainWindow === window) {
@@ -1157,6 +2031,8 @@ async function bootstrap(): Promise<void> {
   backendWsUrl = `ws://127.0.0.1:${backendPort}/?token=${encodeURIComponent(backendAuthToken)}`;
   process.env.T3CODE_DESKTOP_WS_URL = backendWsUrl;
   writeDesktopLogHeader(`bootstrap resolved websocket url=${backendWsUrl}`);
+  await startOperatorApiServer();
+  writeDesktopLogHeader(`bootstrap operator api url=${operatorApiUrl}`);
 
   registerIpcHandlers();
   writeDesktopLogHeader("bootstrap ipc handlers registered");
@@ -1170,7 +2046,9 @@ app.on("before-quit", () => {
   isQuitting = true;
   writeDesktopLogHeader("before-quit received");
   clearUpdatePollTimer();
+  destroyBrowserSessions();
   stopBackend();
+  void stopOperatorApiServer();
   restoreStdIoCapture?.();
 });
 
@@ -1209,6 +2087,7 @@ if (process.platform !== "win32") {
     writeDesktopLogHeader("SIGINT received");
     clearUpdatePollTimer();
     stopBackend();
+    void stopOperatorApiServer();
     restoreStdIoCapture?.();
     app.quit();
   });
@@ -1219,6 +2098,7 @@ if (process.platform !== "win32") {
     writeDesktopLogHeader("SIGTERM received");
     clearUpdatePollTimer();
     stopBackend();
+    void stopOperatorApiServer();
     restoreStdIoCapture?.();
     app.quit();
   });

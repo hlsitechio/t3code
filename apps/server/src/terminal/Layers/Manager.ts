@@ -28,7 +28,7 @@ import {
 } from "../Services/Manager";
 
 const DEFAULT_HISTORY_LINE_LIMIT = 5_000;
-const DEFAULT_PERSIST_DEBOUNCE_MS = 40;
+const DEFAULT_PERSIST_DEBOUNCE_MS = 250;
 const DEFAULT_SUBPROCESS_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_PROCESS_KILL_GRACE_MS = 1_000;
 const DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS = 128;
@@ -242,14 +242,26 @@ async function defaultSubprocessChecker(terminalPid: number): Promise<boolean> {
 
 function capHistory(history: string, maxLines: number): string {
   if (history.length === 0) return history;
-  const hasTrailingNewline = history.endsWith("\n");
-  const lines = history.split("\n");
-  if (hasTrailingNewline) {
-    lines.pop();
+
+  // Fast path: count newlines without splitting the entire string.
+  // Only split+slice when we actually exceed the limit.
+  let newlineCount = 0;
+  for (let i = 0; i < history.length; i++) {
+    if (history.charCodeAt(i) === 10) newlineCount++;
   }
-  if (lines.length <= maxLines) return history;
-  const capped = lines.slice(lines.length - maxLines).join("\n");
-  return hasTrailingNewline ? `${capped}\n` : capped;
+
+  const hasTrailingNewline = history.charCodeAt(history.length - 1) === 10;
+  const lineCount = hasTrailingNewline ? newlineCount : newlineCount + 1;
+  if (lineCount <= maxLines) return history;
+
+  // Find the index of the (lineCount - maxLines)th newline to skip leading lines
+  let linesToSkip = lineCount - maxLines;
+  let offset = 0;
+  while (linesToSkip > 0 && offset < history.length) {
+    if (history.charCodeAt(offset) === 10) linesToSkip--;
+    offset++;
+  }
+  return history.slice(offset);
 }
 
 function legacySafeThreadId(threadId: string): string {
@@ -376,6 +388,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           status: "starting",
           pid: null,
           history,
+          historyDirty: false,
           exitCode: null,
           exitSignal: null,
           updatedAt: new Date().toISOString(),
@@ -495,6 +508,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           status: "starting",
           pid: null,
           history: "",
+          historyDirty: false,
           exitCode: null,
           exitSignal: null,
           updatedAt: new Date().toISOString(),
@@ -692,14 +706,17 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
   }
 
   private onProcessData(session: TerminalSessionState, data: string): void {
-    session.history = capHistory(`${session.history}${data}`, this.historyLineLimit);
-    session.updatedAt = new Date().toISOString();
-    this.queuePersist(session.threadId, session.terminalId, session.history);
+    session.history += data;
+    // Defer the expensive capHistory to persist time instead of every data event
+    session.historyDirty = true;
+    const now = new Date().toISOString();
+    session.updatedAt = now;
+    this.queuePersist(session.threadId, session.terminalId);
     this.emitEvent({
       type: "output",
       threadId: session.threadId,
       terminalId: session.terminalId,
-      createdAt: new Date().toISOString(),
+      createdAt: now,
       data,
     });
   }
@@ -817,9 +834,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     }
   }
 
-  private queuePersist(threadId: string, terminalId: string, history: string): void {
-    const persistenceKey = toSessionKey(threadId, terminalId);
-    this.pendingPersistHistory.set(persistenceKey, history);
+  private queuePersist(threadId: string, terminalId: string): void {
     this.schedulePersist(threadId, terminalId);
   }
 
@@ -859,8 +874,9 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       if (this.persistQueues.get(persistenceKey) === next) {
         this.persistQueues.delete(persistenceKey);
       }
+      const session = this.sessions.get(persistenceKey);
       if (
-        this.pendingPersistHistory.has(persistenceKey) &&
+        session?.historyDirty &&
         !this.persistTimers.has(persistenceKey)
       ) {
         this.schedulePersist(threadId, terminalId);
@@ -875,10 +891,14 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     if (this.persistTimers.has(persistenceKey)) return;
     const timer = setTimeout(() => {
       this.persistTimers.delete(persistenceKey);
-      const pendingHistory = this.pendingPersistHistory.get(persistenceKey);
-      if (pendingHistory === undefined) return;
-      this.pendingPersistHistory.delete(persistenceKey);
-      void this.enqueuePersistWrite(threadId, terminalId, pendingHistory);
+      const session = this.sessions.get(persistenceKey);
+      if (!session) return;
+      // Cap history only at persist boundaries, not on every data event
+      if (session.historyDirty) {
+        session.history = capHistory(session.history, this.historyLineLimit);
+        session.historyDirty = false;
+      }
+      void this.enqueuePersistWrite(threadId, terminalId, session.history);
     }, this.persistDebounceMs);
     this.persistTimers.set(persistenceKey, timer);
   }
@@ -956,10 +976,11 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     this.clearPersistTimer(threadId, terminalId);
 
     while (true) {
-      const pendingHistory = this.pendingPersistHistory.get(persistenceKey);
-      if (pendingHistory !== undefined) {
-        this.pendingPersistHistory.delete(persistenceKey);
-        await this.enqueuePersistWrite(threadId, terminalId, pendingHistory);
+      const session = this.sessions.get(persistenceKey);
+      if (session?.historyDirty) {
+        session.history = capHistory(session.history, this.historyLineLimit);
+        session.historyDirty = false;
+        await this.enqueuePersistWrite(threadId, terminalId, session.history);
       }
 
       const pending = this.persistQueues.get(persistenceKey);

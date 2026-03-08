@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 import { homedir } from "node:os";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
@@ -42,6 +44,58 @@ class DevRunnerError extends Data.TaggedError("DevRunnerError")<{
   readonly message: string;
   readonly cause?: unknown;
 }> {}
+
+function parseDotEnvFile(filePath: string): Record<string, string> {
+  if (!existsSync(filePath)) {
+    return {};
+  }
+
+  const fileContents = readFileSync(filePath, "utf8");
+  const parsed: Record<string, string> = {};
+
+  for (const rawLine of fileContents.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (line.length === 0 || line.startsWith("#")) {
+      continue;
+    }
+
+    const equalsIndex = line.indexOf("=");
+    if (equalsIndex <= 0) {
+      continue;
+    }
+
+    const key = line.slice(0, equalsIndex).trim();
+    let value = line.slice(equalsIndex + 1).trim();
+
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+
+    if (key.length > 0) {
+      parsed[key] = value;
+    }
+  }
+
+  return parsed;
+}
+
+function loadLocalEnvFiles(): NodeJS.ProcessEnv {
+  const cwd = process.cwd();
+  const layeredEnvFiles = [
+    path.join(cwd, ".env.local"),
+    path.join(cwd, "apps", "server", ".env.local"),
+    path.join(cwd, "apps", "web", ".env.local"),
+    path.join(cwd, "apps", "desktop", ".env.local"),
+  ];
+
+  return layeredEnvFiles.reduce<NodeJS.ProcessEnv>(
+    (env, filePath) => Object.assign(env, parseDotEnvFile(filePath)),
+    {},
+  );
+}
 
 const optionalStringConfig = (name: string): Config.Config<string | undefined> =>
   Config.string(name).pipe(
@@ -378,6 +432,7 @@ const resolveOptionalBooleanOverride = (
 
 export function runDevRunnerWithInput(input: DevRunnerCliInput) {
   return Effect.gen(function* () {
+    const localEnv = loadLocalEnvFiles();
     const { portOffset, devInstance } = yield* OffsetConfig.asEffect().pipe(
       Effect.mapError(
         (cause) =>
@@ -414,7 +469,10 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
 
     const env = yield* createDevRunnerEnv({
       mode: input.mode,
-      baseEnv: process.env,
+      baseEnv: {
+        ...process.env,
+        ...localEnv,
+      },
       serverOffset,
       webOffset,
       stateDir: input.stateDir,

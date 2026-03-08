@@ -20,7 +20,10 @@ import type {
   ProjectWriteFileInput,
   ProjectWriteFileResult,
 } from "./project";
-import type { ServerConfig } from "./server";
+import type {
+  ServerConfig,
+  ServerDetectCliInstallationsResult,
+} from "./server";
 import type {
   TerminalClearInput,
   TerminalCloseInput,
@@ -40,6 +43,7 @@ import type {
   OrchestrationEvent,
   OrchestrationReadModel,
 } from "./orchestration";
+import type { CanvasGetStateInput, CanvasUpsertStateInput, ThreadCanvasState } from "./canvas";
 import { EditorId } from "./editor";
 
 export interface ContextMenuItem<T extends string = string> {
@@ -77,6 +81,69 @@ export interface DesktopUpdateActionResult {
   state: DesktopUpdateState;
 }
 
+export interface DesktopBrowserViewState {
+  threadId: string;
+  url: string | null;
+  title: string | null;
+  loading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  isVisible: boolean;
+  lastUpdatedAt: string;
+}
+
+export interface DesktopBrowserViewBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface DesktopBrowserObservedElement {
+  tag: string;
+  role: string | null;
+  text: string | null;
+  label: string | null;
+  placeholder: string | null;
+  name: string | null;
+  id: string | null;
+  type: string | null;
+  href: string | null;
+  editable: boolean;
+}
+
+export interface DesktopBrowserObserveResult {
+  threadId: string;
+  url: string | null;
+  title: string | null;
+  elements: DesktopBrowserObservedElement[];
+  matchedElement: DesktopBrowserObservedElement | null;
+  documentText: string;
+  lastUpdatedAt: string;
+}
+
+export type DesktopBrowserActInput =
+  | { kind: "click"; target: string }
+  | { kind: "type"; target: string; text: string; submit?: boolean }
+  | { kind: "press"; key: string }
+  | { kind: "scroll"; direction: "up" | "down"; amount?: number };
+
+export interface DesktopBrowserActionResult {
+  threadId: string;
+  ok: boolean;
+  detail: string;
+  state: DesktopBrowserViewState;
+  observation?: DesktopBrowserObserveResult;
+}
+
+export interface DesktopBrowserExtractResult {
+  threadId: string;
+  url: string | null;
+  title: string | null;
+  text: string;
+  lastUpdatedAt: string;
+}
+
 export interface DesktopBridge {
   getWsUrl: () => string | null;
   pickFolder: () => Promise<string | null>;
@@ -91,6 +158,22 @@ export interface DesktopBridge {
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
   installUpdate: () => Promise<DesktopUpdateActionResult>;
   onUpdateState: (listener: (state: DesktopUpdateState) => void) => () => void;
+  browserAttach: (threadId: string) => Promise<DesktopBrowserViewState>;
+  browserSetVisible: (
+    threadId: string,
+    visible: boolean,
+    bounds?: DesktopBrowserViewBounds,
+  ) => Promise<DesktopBrowserViewState>;
+  browserNavigate: (threadId: string, url: string) => Promise<DesktopBrowserViewState>;
+  browserGoBack: (threadId: string) => Promise<DesktopBrowserViewState>;
+  browserGoForward: (threadId: string) => Promise<DesktopBrowserViewState>;
+  browserReload: (threadId: string) => Promise<DesktopBrowserViewState>;
+  browserGetState: (threadId: string) => Promise<DesktopBrowserViewState>;
+  browserObserve: (threadId: string, target?: string) => Promise<DesktopBrowserObserveResult>;
+  browserAct: (threadId: string, action: DesktopBrowserActInput) => Promise<DesktopBrowserActionResult>;
+  browserExtract: (threadId: string, query?: string) => Promise<DesktopBrowserExtractResult>;
+  browserWait: (threadId: string, durationMs: number) => Promise<DesktopBrowserViewState>;
+  onBrowserState: (listener: (state: DesktopBrowserViewState) => void) => () => void;
 }
 
 export interface NativeApi {
@@ -115,6 +198,24 @@ export interface NativeApi {
     openInEditor: (cwd: string, editor: EditorId) => Promise<void>;
     openExternal: (url: string) => Promise<void>;
   };
+  github: {
+    startDeviceFlow: () => Promise<{
+      deviceCode: string;
+      userCode: string;
+      verificationUri: string;
+      expiresIn: number;
+      interval: number;
+    }>;
+    pollDeviceFlow: (input: {
+      deviceCode: string;
+      interval: number;
+      expiresIn: number;
+    }) => Promise<{
+      accessToken: string;
+      tokenType: string;
+      scope: string;
+    }>;
+  };
   git: {
     // Existing branch/worktree API
     listBranches: (input: GitListBranchesInput) => Promise<GitListBranchesResult>;
@@ -137,6 +238,11 @@ export interface NativeApi {
   server: {
     getConfig: () => Promise<ServerConfig>;
     upsertKeybinding: (input: ServerUpsertKeybindingInput) => Promise<ServerUpsertKeybindingResult>;
+    detectCliInstallations: () => Promise<ServerDetectCliInstallationsResult>;
+  };
+  canvas: {
+    getState: (input: CanvasGetStateInput) => Promise<ThreadCanvasState>;
+    upsertState: (input: CanvasUpsertStateInput) => Promise<ThreadCanvasState>;
   };
   orchestration: {
     getSnapshot: () => Promise<OrchestrationReadModel>;
@@ -147,5 +253,23 @@ export interface NativeApi {
     ) => Promise<OrchestrationGetFullThreadDiffResult>;
     replayEvents: (fromSequenceExclusive: number) => Promise<OrchestrationEvent[]>;
     onDomainEvent: (callback: (event: OrchestrationEvent) => void) => () => void;
+  };
+  browser: {
+    attach: (threadId: string) => Promise<DesktopBrowserViewState>;
+    setVisible: (
+      threadId: string,
+      visible: boolean,
+      bounds?: DesktopBrowserViewBounds,
+    ) => Promise<DesktopBrowserViewState>;
+    navigate: (threadId: string, url: string) => Promise<DesktopBrowserViewState>;
+    goBack: (threadId: string) => Promise<DesktopBrowserViewState>;
+    goForward: (threadId: string) => Promise<DesktopBrowserViewState>;
+    reload: (threadId: string) => Promise<DesktopBrowserViewState>;
+    getState: (threadId: string) => Promise<DesktopBrowserViewState>;
+    observe: (threadId: string, target?: string) => Promise<DesktopBrowserObserveResult>;
+    act: (threadId: string, action: DesktopBrowserActInput) => Promise<DesktopBrowserActionResult>;
+    extract: (threadId: string, query?: string) => Promise<DesktopBrowserExtractResult>;
+    wait: (threadId: string, durationMs: number) => Promise<DesktopBrowserViewState>;
+    onState: (listener: (state: DesktopBrowserViewState) => void) => () => void;
   };
 }

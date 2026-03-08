@@ -1,15 +1,18 @@
 import {
+  BookOpenIcon,
+  ChevronLeftIcon,
   ChevronRightIcon,
   FolderIcon,
+  FolderPlusIcon,
   GitPullRequestIcon,
   RocketIcon,
+  Settings2Icon,
   SquarePenIcon,
   TerminalIcon,
+  UserRoundIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  DEFAULT_RUNTIME_MODE,
-  DEFAULT_MODEL_BY_PROVIDER,
   type DesktopUpdateState,
   ProjectId,
   ThreadId,
@@ -17,11 +20,11 @@ import {
   type ResolvedKeybindingsConfig,
 } from "@t3tools/contracts";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useParams } from "@tanstack/react-router";
+import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
 import { useAppSettings } from "../appSettings";
 import { isElectron } from "../env";
 import { APP_STAGE_LABEL } from "../branding";
-import { newCommandId, newProjectId, newThreadId } from "../lib/utils";
+import { newCommandId } from "../lib/utils";
 import { useStore } from "../store";
 import { isChatNewLocalShortcut, isChatNewShortcut, shortcutLabelForCommand } from "../keybindings";
 import { type Thread } from "../types";
@@ -29,9 +32,13 @@ import { derivePendingApprovals } from "../session-logic";
 import { gitRemoveWorktreeMutationOptions, gitStatusQueryOptions } from "../lib/gitReactQuery";
 import { serverConfigQueryOptions } from "../lib/serverReactQuery";
 import { readNativeApi } from "../nativeApi";
-import { type DraftThreadEnvMode, useComposerDraftStore } from "../composerDraftStore";
+import { useComposerDraftStore } from "../composerDraftStore";
+import { useProjectOnboarding } from "../hooks/useProjectOnboarding";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
+import { truncateTitle } from "../truncateTitle";
+import { useDesktopAuth } from "../auth";
 import { toastManager } from "./ui/toast";
+import { Menu, MenuItem, MenuPopup, MenuTrigger } from "./ui/menu";
 import {
   getDesktopUpdateActionError,
   getDesktopUpdateButtonTooltip,
@@ -55,14 +62,18 @@ import {
   SidebarMenuSub,
   SidebarMenuSubButton,
   SidebarMenuSubItem,
+  useSidebar,
   SidebarSeparator,
   SidebarTrigger,
 } from "./ui/sidebar";
 import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "../worktreeCleanup";
-import { isNonEmpty as isNonEmptyString } from "effect/String";
 
 const EMPTY_KEYBINDINGS: ResolvedKeybindingsConfig = [];
 const THREAD_PREVIEW_LIMIT = 6;
+const SIDEBAR_SPACE_STORAGE_KEY = "t3code:sidebar-space";
+const SETTINGS_TARGET_SECTION_STORAGE_KEY = "t3code:settings-target-section";
+
+type SidebarSpace = "chat" | "projects";
 
 async function copyTextToClipboard(text: string): Promise<void> {
   if (typeof navigator === "undefined" || navigator.clipboard?.writeText === undefined) {
@@ -79,6 +90,12 @@ function formatRelativeTime(iso: string): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ago`;
   return `${Math.floor(hours / 24)}d ago`;
+}
+
+function readSidebarSpaceFromStorage(): SidebarSpace | null {
+  if (typeof window === "undefined") return null;
+  const stored = window.localStorage.getItem(SIDEBAR_SPACE_STORAGE_KEY);
+  return stored === "chat" || stored === "projects" ? stored : null;
 }
 
 interface ThreadStatusPill {
@@ -258,19 +275,22 @@ function ProjectFavicon({ cwd }: { cwd: string }) {
 }
 
 export default function Sidebar() {
+  const { state, setOpen } = useSidebar();
+  const isCollapsed = state === "collapsed";
+  const auth = useDesktopAuth();
   const projects = useStore((store) => store.projects);
   const threads = useStore((store) => store.threads);
   const markThreadUnread = useStore((store) => store.markThreadUnread);
   const toggleProject = useStore((store) => store.toggleProject);
   const clearComposerDraftForThread = useComposerDraftStore((store) => store.clearThreadDraft);
+  const draftThreadsByThreadId = useComposerDraftStore((store) => store.draftThreadsByThreadId);
+  const composerDraftsByThreadId = useComposerDraftStore((store) => store.draftsByThreadId);
   const getDraftThreadByProjectId = useComposerDraftStore(
     (store) => store.getDraftThreadByProjectId,
   );
   const getDraftThread = useComposerDraftStore((store) => store.getDraftThread);
   const terminalStateByThreadId = useTerminalStateStore((state) => state.terminalStateByThreadId);
   const clearTerminalState = useTerminalStateStore((state) => state.clearTerminalState);
-  const setProjectDraftThreadId = useComposerDraftStore((store) => store.setProjectDraftThreadId);
-  const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
   const clearProjectDraftThreadId = useComposerDraftStore(
     (store) => store.clearProjectDraftThreadId,
   );
@@ -278,11 +298,15 @@ export default function Sidebar() {
     (store) => store.clearProjectDraftThreadById,
   );
   const navigate = useNavigate();
+  const location = useLocation();
   const { settings: appSettings } = useAppSettings();
   const routeThreadId = useParams({
     strict: false,
     select: (params) => (params.threadId ? ThreadId.makeUnsafe(params.threadId) : null),
   });
+  const [sidebarSpace, setSidebarSpace] = useState<SidebarSpace>(
+    () => readSidebarSpaceFromStorage() ?? (routeThreadId ? "projects" : "chat"),
+  );
   const { data: keybindings = EMPTY_KEYBINDINGS } = useQuery({
     ...serverConfigQueryOptions(),
     select: (config) => config.keybindings,
@@ -301,6 +325,8 @@ export default function Sidebar() {
   const renamingCommittedRef = useRef(false);
   const renamingInputRef = useRef<HTMLInputElement | null>(null);
   const [desktopUpdateState, setDesktopUpdateState] = useState<DesktopUpdateState | null>(null);
+  const isSettingsRoute = location.pathname === "/settings";
+  const isDocsRoute = location.pathname === "/docs";
   const pendingApprovalByThreadId = useMemo(() => {
     const map = new Map<ThreadId, boolean>();
     for (const thread of threads) {
@@ -381,167 +407,202 @@ export default function Sidebar() {
       });
     });
   }, []);
-
-  const handleNewThread = useCallback(
-    (
-      projectId: ProjectId,
-      options?: {
-        branch?: string | null;
-        worktreePath?: string | null;
-        envMode?: DraftThreadEnvMode;
-      },
-    ): Promise<void> => {
-      const hasBranchOption = options?.branch !== undefined;
-      const hasWorktreePathOption = options?.worktreePath !== undefined;
-      const hasEnvModeOption = options?.envMode !== undefined;
-      const storedDraftThread = getDraftThreadByProjectId(projectId);
-      if (storedDraftThread) {
-        return (async () => {
-          if (hasBranchOption || hasWorktreePathOption || hasEnvModeOption) {
-            setDraftThreadContext(storedDraftThread.threadId, {
-              ...(hasBranchOption ? { branch: options?.branch ?? null } : {}),
-              ...(hasWorktreePathOption ? { worktreePath: options?.worktreePath ?? null } : {}),
-              ...(hasEnvModeOption ? { envMode: options?.envMode } : {}),
-            });
-          }
-          setProjectDraftThreadId(projectId, storedDraftThread.threadId);
-          if (routeThreadId === storedDraftThread.threadId) {
-            return;
-          }
-          await navigate({
-            to: "/$threadId",
-            params: { threadId: storedDraftThread.threadId },
-          });
-        })();
-      }
-      clearProjectDraftThreadId(projectId);
-
-      const activeDraftThread = routeThreadId ? getDraftThread(routeThreadId) : null;
-      if (activeDraftThread && routeThreadId && activeDraftThread.projectId === projectId) {
-        if (hasBranchOption || hasWorktreePathOption || hasEnvModeOption) {
-          setDraftThreadContext(routeThreadId, {
-            ...(hasBranchOption ? { branch: options?.branch ?? null } : {}),
-            ...(hasWorktreePathOption ? { worktreePath: options?.worktreePath ?? null } : {}),
-            ...(hasEnvModeOption ? { envMode: options?.envMode } : {}),
-          });
-        }
-        setProjectDraftThreadId(projectId, routeThreadId);
-        return Promise.resolve();
-      }
-      const threadId = newThreadId();
-      const createdAt = new Date().toISOString();
-      return (async () => {
-        setProjectDraftThreadId(projectId, threadId, {
-          createdAt,
-          branch: options?.branch ?? null,
-          worktreePath: options?.worktreePath ?? null,
-          envMode: options?.envMode ?? "local",
-          runtimeMode: DEFAULT_RUNTIME_MODE,
-        });
-
-        await navigate({
-          to: "/$threadId",
-          params: { threadId },
-        });
-      })();
-    },
-    [
-      clearProjectDraftThreadId,
-      getDraftThreadByProjectId,
-      navigate,
-      getDraftThread,
-      routeThreadId,
-      setDraftThreadContext,
-      setProjectDraftThreadId,
-    ],
+  const { addProjectWithToast, handleNewThread, pickFolderAndAddProject } =
+    useProjectOnboarding(routeThreadId);
+  const sortedThreads = useMemo(
+    () =>
+      threads.toSorted((a, b) => {
+        const byDate = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+        if (byDate !== 0) return byDate;
+        return b.id.localeCompare(a.id);
+      }),
+    [threads],
   );
-
-  const focusMostRecentThreadForProject = useCallback(
-    (projectId: ProjectId) => {
-      const latestThread = threads
-        .filter((thread) => thread.projectId === projectId)
-        .toSorted((a, b) => {
-          const byDate = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-          if (byDate !== 0) return byDate;
-          return b.id.localeCompare(a.id);
-        })[0];
-      if (!latestThread) return;
-
-      void navigate({
-        to: "/$threadId",
-        params: { threadId: latestThread.id },
+  const chatListEntries = useMemo(() => {
+    const persistedThreadIds = new Set(sortedThreads.map((thread) => thread.id));
+    const draftEntries = Object.entries(draftThreadsByThreadId)
+      .filter(([threadId]) => !persistedThreadIds.has(ThreadId.makeUnsafe(threadId)))
+      .map(([threadId, draftThread]) => {
+        const draft = composerDraftsByThreadId[threadId as ThreadId];
+        const promptTitle = draft?.prompt.trim() ?? "";
+        return {
+          id: threadId as ThreadId,
+          createdAt: draftThread.createdAt,
+          projectId: draftThread.projectId,
+          isDraft: true as const,
+          title: truncateTitle(promptTitle) || "New chat",
+        };
       });
-    },
-    [navigate, threads],
-  );
+
+    const threadEntries = sortedThreads.map((thread) => ({
+      id: thread.id,
+      createdAt: thread.createdAt,
+      projectId: thread.projectId,
+      isDraft: false as const,
+      title: thread.title,
+      thread,
+    }));
+
+    return [...threadEntries, ...draftEntries].toSorted((a, b) => {
+      const byDate = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      if (byDate !== 0) return byDate;
+      return b.id.localeCompare(a.id);
+    });
+  }, [composerDraftsByThreadId, draftThreadsByThreadId, sortedThreads]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(SIDEBAR_SPACE_STORAGE_KEY, sidebarSpace);
+  }, [sidebarSpace]);
 
   const addProjectFromPath = useCallback(
     async (rawCwd: string) => {
       const cwd = rawCwd.trim();
       if (!cwd || isAddingProject) return;
-      const api = readNativeApi();
-      if (!api) return;
-
       setIsAddingProject(true);
-      const finishAddingProject = () => {
-        setIsAddingProject(false);
-        setNewCwd("");
-        setAddingProject(false);
-      };
-
-      const existing = projects.find((project) => project.cwd === cwd);
-      if (existing) {
-        focusMostRecentThreadForProject(existing.id);
-        finishAddingProject();
-        return;
-      }
-
-      const projectId = newProjectId();
-      const createdAt = new Date().toISOString();
-      const title = cwd.split(/[/\\]/).findLast(isNonEmptyString) ?? cwd;
-      try {
-        await api.orchestration.dispatchCommand({
-          type: "project.create",
-          commandId: newCommandId(),
-          projectId,
-          title,
-          workspaceRoot: cwd,
-          defaultModel: DEFAULT_MODEL_BY_PROVIDER.codex,
-          createdAt,
-        });
-        await handleNewThread(projectId).catch(() => undefined);
-      } catch (error) {
-        setIsAddingProject(false);
-        toastManager.add({
-          type: "error",
-          title: "Unable to add project",
-          description:
-            error instanceof Error ? error.message : "An error occurred while adding the project.",
-        });
-        return;
-      }
-      finishAddingProject();
+      await addProjectWithToast(cwd);
+      setIsAddingProject(false);
+      setNewCwd("");
+      setAddingProject(false);
     },
-    [focusMostRecentThreadForProject, handleNewThread, isAddingProject, projects],
+    [addProjectWithToast, isAddingProject],
   );
 
   const handleAddProject = () => {
     void addProjectFromPath(newCwd);
   };
 
-  const handlePickFolder = async () => {
-    const api = readNativeApi();
-    if (!api || isPickingFolder) return;
-    setIsPickingFolder(true);
-    let pickedPath: string | null = null;
+  const showChatSpace = useCallback(async () => {
+    setSidebarSpace("chat");
+    if (routeThreadId) {
+      await navigate({
+        to: "/$threadId",
+        params: { threadId: routeThreadId },
+      });
+      return;
+    }
+
+    const latestThread = sortedThreads[0];
+    if (latestThread) {
+      await navigate({
+        to: "/$threadId",
+        params: { threadId: latestThread.id },
+      });
+      return;
+    }
+
+    if (location.pathname !== "/") {
+      await navigate({ to: "/" });
+    }
+  }, [location.pathname, navigate, routeThreadId, sortedThreads]);
+
+  const showProjectsSpace = useCallback(async () => {
+    setSidebarSpace("projects");
+    if (routeThreadId) {
+      return;
+    }
+
+    const latestThread = sortedThreads[0];
+    if (latestThread) {
+      await navigate({
+        to: "/$threadId",
+        params: { threadId: latestThread.id },
+      });
+      return;
+    }
+
+    const firstProject = projects[0];
+    if (firstProject) {
+      await handleNewThread(firstProject.id);
+      return;
+    }
+
+    setOpen(true);
+    setAddingProject(true);
+  }, [handleNewThread, navigate, projects, routeThreadId, setOpen, sortedThreads]);
+
+  const createNewChat = useCallback(async () => {
+    setSidebarSpace("chat");
+    const activeThread = routeThreadId ? threads.find((thread) => thread.id === routeThreadId) : null;
+    const activeDraftThread = routeThreadId ? getDraftThread(routeThreadId) : null;
+    const projectId = activeThread?.projectId ?? activeDraftThread?.projectId ?? projects[0]?.id ?? null;
+
+    if (!projectId) {
+      if (location.pathname !== "/") {
+        await navigate({ to: "/" });
+      }
+      return;
+    }
+
+    await handleNewThread(projectId);
+  }, [getDraftThread, handleNewThread, location.pathname, navigate, projects, routeThreadId, threads]);
+
+  const githubConnected = Boolean(
+    appSettings.githubToken || (appSettings.githubOwner && appSettings.githubRepo),
+  );
+  const openGithubSettings = useCallback(() => {
     try {
-      pickedPath = await api.dialogs.pickFolder();
+      window.localStorage.setItem(SETTINGS_TARGET_SECTION_STORAGE_KEY, "github");
     } catch {
-      // Ignore picker failures and leave the current thread selection unchanged.
+      // best effort
     }
-    if (pickedPath) {
-      await addProjectFromPath(pickedPath);
-    }
+    void navigate({ to: "/settings" });
+  }, [navigate]);
+  const openGithubControllerAction = useCallback(
+    (action: "connect" | "settings" | "pull-requests" | "actions" | "security") => {
+      if (action === "connect") {
+        const api = readNativeApi();
+        void api?.shell
+          .openExternal("https://github.com/login/device")
+          .catch(() => undefined);
+        toastManager.add({
+          type: "info",
+          title: "GitHub connect started",
+          description: "Complete login, then verify connection in Settings > GitHub.",
+        });
+        openGithubSettings();
+        return;
+      }
+      if (action === "settings") {
+        openGithubSettings();
+        return;
+      }
+      toastManager.add({
+        type: "info",
+        title: "Coming soon",
+        description: "GitHub runtime action will be available in a follow-up update.",
+      });
+    },
+    [openGithubSettings],
+  );
+
+  const footerNavigationItems = [
+    {
+      id: "docs",
+      label: "Documentation",
+      shortLabel: "Docs",
+      icon: BookOpenIcon,
+      active: isDocsRoute,
+      onClick: () => {
+        void navigate({ to: "/docs" });
+      },
+    },
+    {
+      id: "settings",
+      label: "Settings",
+      shortLabel: "Settings",
+      icon: Settings2Icon,
+      active: isSettingsRoute,
+      onClick: () => {
+        void navigate({ to: "/settings" });
+      },
+    },
+  ] as const;
+
+  const handlePickFolder = async () => {
+    if (isPickingFolder) return;
+    setIsPickingFolder(true);
+    await pickFolderAndAddProject().catch(() => undefined);
     setIsPickingFolder(false);
   };
 
@@ -978,15 +1039,53 @@ export default function Sidebar() {
   const wordmark = (
     <div className="flex items-center gap-2">
       <SidebarTrigger className="shrink-0 md:hidden" />
-      <div className="flex min-w-0 flex-1 items-center gap-1 mt-2 ml-1">
+      <div className="flex min-w-0 flex-1 items-center gap-1">
+        <SidebarTrigger className="hidden size-7 shrink-0 md:inline-flex" />
         <T3Wordmark />
-        <span className="truncate text-sm font-medium tracking-tight text-muted-foreground">
+        <span className="truncate text-sm font-medium tracking-tight text-muted-foreground group-data-[collapsible=icon]:hidden">
           Code
         </span>
-        <span className="rounded-full bg-muted/50 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-muted-foreground/60">
+        <span className="rounded-full bg-muted/50 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-muted-foreground/60 group-data-[collapsible=icon]:hidden">
           {APP_STAGE_LABEL}
         </span>
       </div>
+    </div>
+  );
+
+  const spaceLabel = sidebarSpace === "chat" ? "Chat only" : "Projects";
+  const spaceSwitcher = isCollapsed ? null : (
+    <div className="flex items-center justify-between gap-1 rounded-full border border-border/70 bg-card/70 px-1 py-1">
+      <button
+        type="button"
+        aria-label="Switch to chat only"
+        className={`inline-flex size-6 items-center justify-center rounded-full transition-colors ${
+          sidebarSpace === "chat"
+            ? "bg-accent text-foreground"
+            : "text-muted-foreground hover:bg-accent/70 hover:text-foreground"
+        }`}
+        onClick={() => {
+          void showChatSpace();
+        }}
+      >
+        <ChevronLeftIcon className="size-3.5" />
+      </button>
+      <span className="min-w-[74px] text-center text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground/75">
+        {spaceLabel}
+      </span>
+      <button
+        type="button"
+        aria-label="Switch to projects"
+        className={`inline-flex size-6 items-center justify-center rounded-full transition-colors ${
+          sidebarSpace === "projects"
+            ? "bg-accent text-foreground"
+            : "text-muted-foreground hover:bg-accent/70 hover:text-foreground"
+        }`}
+        onClick={() => {
+          void showProjectsSpace();
+        }}
+      >
+        <ChevronRightIcon className="size-3.5" />
+      </button>
     </div>
   );
 
@@ -994,27 +1093,37 @@ export default function Sidebar() {
     <>
       {isElectron ? (
         <>
-          <SidebarHeader className="drag-region h-[52px] flex-row items-center gap-2 px-4 py-0 pl-[82px]">
-            {wordmark}
-            {showDesktopUpdateButton && (
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <button
-                      type="button"
-                      aria-label={desktopUpdateTooltip}
-                      aria-disabled={desktopUpdateButtonDisabled || undefined}
-                      disabled={desktopUpdateButtonDisabled}
-                      className={`inline-flex size-7 ml-auto mt-2 items-center justify-center rounded-md text-muted-foreground transition-colors ${desktopUpdateButtonInteractivityClasses} ${desktopUpdateButtonClasses}`}
-                      onClick={handleDesktopUpdateButtonClick}
-                    >
-                      <RocketIcon className="size-3.5" />
-                    </button>
-                  }
-                />
-                <TooltipPopup side="bottom">{desktopUpdateTooltip}</TooltipPopup>
-              </Tooltip>
-            )}
+          <SidebarHeader
+            className={
+              isCollapsed
+                ? "drag-region h-[52px] flex-row items-center gap-2 px-2 py-0"
+                : "drag-region gap-2 px-3 py-2"
+            }
+          >
+            <div className="flex min-h-8 items-center gap-2">
+              {wordmark}
+              {showDesktopUpdateButton && (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <button
+                        type="button"
+                        aria-label={desktopUpdateTooltip}
+                        aria-disabled={desktopUpdateButtonDisabled || undefined}
+                        disabled={desktopUpdateButtonDisabled}
+                        className={`inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors ${
+                          isCollapsed ? "" : "ml-auto"
+                        } ${desktopUpdateButtonInteractivityClasses} ${desktopUpdateButtonClasses}`}
+                        onClick={handleDesktopUpdateButtonClick}
+                      >
+                        <RocketIcon className="size-3.5" />
+                      </button>
+                    }
+                  />
+                  <TooltipPopup side="bottom">{desktopUpdateTooltip}</TooltipPopup>
+                </Tooltip>
+              )}
+            </div>
           </SidebarHeader>
         </>
       ) : (
@@ -1024,9 +1133,121 @@ export default function Sidebar() {
       )}
 
       <SidebarContent className="gap-0">
+        {spaceSwitcher ? (
+          <div className="px-3 pt-2 pb-1 group-data-[collapsible=icon]:hidden">
+            {spaceSwitcher}
+          </div>
+        ) : null}
+        <div className="px-2 pb-1">
+          {sidebarSpace === "chat" ? (
+            isCollapsed ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <button
+                      type="button"
+                      className="flex size-8 items-center justify-center rounded-md border border-dashed border-border text-muted-foreground/70 transition-colors duration-150 hover:border-ring hover:text-muted-foreground"
+                      onClick={() => {
+                        void createNewChat();
+                      }}
+                      aria-label="New chat"
+                    />
+                  }
+                >
+                  <SquarePenIcon className="size-4" />
+                </TooltipTrigger>
+                <TooltipPopup side="right">New chat</TooltipPopup>
+              </Tooltip>
+            ) : (
+              <button
+                type="button"
+                className="flex w-full items-center justify-center gap-1 rounded-md border border-dashed border-border py-2 text-xs text-muted-foreground/70 transition-colors duration-150 hover:border-ring hover:text-muted-foreground"
+                onClick={() => {
+                  void createNewChat();
+                }}
+              >
+                <SquarePenIcon className="size-3.5" />
+                New chat
+              </button>
+            )
+          ) : isCollapsed && !addingProject ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    className="flex size-8 items-center justify-center rounded-md border border-dashed border-border text-muted-foreground/70 transition-colors duration-150 hover:border-ring hover:text-muted-foreground"
+                    onClick={() => {
+                      setOpen(true);
+                      setAddingProject(true);
+                    }}
+                    aria-label="Add project"
+                  />
+                }
+              >
+                <FolderPlusIcon className="size-4" />
+              </TooltipTrigger>
+              <TooltipPopup side="right">Add project</TooltipPopup>
+            </Tooltip>
+          ) : null}
+
+          {sidebarSpace === "projects" && addingProject ? (
+            <div className="mt-2 rounded-md border border-border/70 bg-background/55 p-2">
+              <p className="mb-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/70">
+                Add project
+              </p>
+              <input
+                className="mb-2 w-full rounded-md border border-border bg-secondary px-2 py-1.5 font-mono text-xs text-foreground placeholder:text-muted-foreground/40 focus:border-ring focus:outline-none"
+                placeholder="/path/to/project"
+                value={newCwd}
+                onChange={(event) => setNewCwd(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") handleAddProject();
+                  if (event.key === "Escape") setAddingProject(false);
+                }}
+              />
+              {isElectron && (
+                <button
+                  type="button"
+                  className="mb-2 flex w-full items-center justify-center rounded-md border border-border px-2 py-1.5 text-xs text-muted-foreground transition-colors duration-150 hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={() => void handlePickFolder()}
+                  disabled={isPickingFolder || isAddingProject}
+                >
+                  {isPickingFolder ? "Picking folder..." : "Browse for folder"}
+                </button>
+              )}
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  className="flex-1 rounded-md bg-primary px-2 py-1 text-xs font-medium text-primary-foreground transition-colors duration-150 hover:bg-primary/90"
+                  onClick={handleAddProject}
+                  disabled={isAddingProject}
+                >
+                  {isAddingProject ? "Adding..." : "Add"}
+                </button>
+                <button
+                  type="button"
+                  className="flex-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground/80 transition-colors duration-150 hover:bg-secondary"
+                  onClick={() => setAddingProject(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : sidebarSpace === "projects" && isCollapsed ? null : sidebarSpace === "projects" ? (
+            <button
+              type="button"
+              className="flex w-full items-center justify-center gap-1 rounded-md border border-dashed border-border py-2 text-xs text-muted-foreground/70 transition-colors duration-150 hover:border-ring hover:text-muted-foreground"
+              onClick={() => setAddingProject(true)}
+            >
+              + Add project
+            </button>
+          ) : null}
+        </div>
         <SidebarGroup className="px-2 py-2">
-          <SidebarMenu>
-            {projects.map((project) => {
+          {sidebarSpace === "projects" ? (
+            <SidebarMenu>
+              {projects.map((project) => {
               const projectThreads = threads
                 .filter((thread) => thread.projectId === project.id)
                 .toSorted((a, b) => {
@@ -1058,6 +1279,7 @@ export default function Sidebar() {
                           <SidebarMenuButton
                             size="sm"
                             className="gap-2 px-2 py-1.5 text-left hover:bg-accent group-hover/project-header:bg-accent group-hover/project-header:text-sidebar-accent-foreground"
+                            tooltip={project.name}
                           />
                         }
                         onContextMenu={(event) => {
@@ -1069,7 +1291,7 @@ export default function Sidebar() {
                         }}
                       >
                         <ChevronRightIcon
-                          className={`-ml-0.5 size-3.5 shrink-0 text-muted-foreground/70 transition-transform duration-150 ${
+                          className={`-ml-0.5 size-3.5 shrink-0 text-muted-foreground/70 transition-transform duration-150 group-data-[collapsible=icon]:hidden ${
                             project.expanded ? "rotate-90" : ""
                           }`}
                         />
@@ -1283,14 +1505,114 @@ export default function Sidebar() {
                   </SidebarMenuItem>
                 </Collapsible>
               );
-            })}
-          </SidebarMenu>
+              })}
+            </SidebarMenu>
+          ) : (
+            <SidebarMenu>
+              {chatListEntries.map((entry) => {
+                const isActive = routeThreadId === entry.id;
+                const project = projects.find((item) => item.id === entry.projectId);
+                const threadStatus = entry.isDraft
+                  ? null
+                  : threadStatusPill(
+                      entry.thread,
+                      pendingApprovalByThreadId.get(entry.id) === true,
+                    );
+                const prStatus = entry.isDraft
+                  ? null
+                  : prStatusIndicator(prByThreadId.get(entry.id) ?? null);
+                const terminalStatus = entry.isDraft
+                  ? null
+                  : terminalStatusFromRunningIds(
+                      selectThreadTerminalState(terminalStateByThreadId, entry.id).runningTerminalIds,
+                    );
 
-          {projects.length === 0 && !addingProject && (
-            <div className="px-2 pt-4 text-center text-xs text-muted-foreground/60">
+                return (
+                  <SidebarMenuItem key={entry.id}>
+                    <SidebarMenuButton
+                      size="sm"
+                      isActive={isActive}
+                      tooltip={entry.title}
+                      className={`h-auto min-h-10 items-start px-2 py-2 ${
+                        isActive
+                          ? "bg-accent/85 text-foreground ring-1 ring-border/70 dark:bg-accent/55 dark:ring-border/50"
+                          : "text-muted-foreground"
+                      }`}
+                      onClick={() => {
+                        void navigate({
+                          to: "/$threadId",
+                          params: { threadId: entry.id },
+                        });
+                      }}
+                      onContextMenu={
+                        entry.isDraft
+                          ? undefined
+                          : (event) => {
+                              event.preventDefault();
+                              void handleThreadContextMenu(entry.id, {
+                                x: event.clientX,
+                                y: event.clientY,
+                              });
+                            }
+                      }
+                    >
+                      <div className="flex min-w-0 flex-1 flex-col gap-1">
+                        <div className="flex min-w-0 items-center gap-1.5">
+                          {prStatus ? (
+                            <GitPullRequestIcon className={`size-3 shrink-0 ${prStatus.colorClass}`} />
+                          ) : null}
+                          {threadStatus ? (
+                            <span
+                              className={`inline-flex items-center gap-1 text-[10px] ${threadStatus.colorClass}`}
+                            >
+                              <span
+                                className={`h-1.5 w-1.5 rounded-full ${threadStatus.dotClass} ${
+                                  threadStatus.pulse ? "animate-pulse" : ""
+                                }`}
+                              />
+                            </span>
+                          ) : null}
+                          <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground/90">
+                            {entry.title}
+                          </span>
+                          {terminalStatus ? (
+                            <TerminalIcon
+                              className={`size-3 shrink-0 ${terminalStatus.colorClass} ${
+                                terminalStatus.pulse ? "animate-pulse" : ""
+                              }`}
+                            />
+                          ) : null}
+                        </div>
+                        <div className="flex items-center gap-2 text-[10px] text-muted-foreground/55">
+                          <span className="truncate">{project?.name ?? "Unknown project"}</span>
+                          {entry.isDraft ? (
+                            <span className="rounded-full border border-border/70 px-1.5 py-0.5 text-[9px] uppercase tracking-[0.14em] text-muted-foreground/65">
+                              Draft
+                            </span>
+                          ) : null}
+                          <span className="shrink-0">{formatRelativeTime(entry.createdAt)}</span>
+                        </div>
+                      </div>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                );
+              })}
+            </SidebarMenu>
+          )}
+
+          {sidebarSpace === "projects" && projects.length === 0 && !addingProject && (
+            <div className="px-2 pt-4 text-center text-xs text-muted-foreground/60 group-data-[collapsible=icon]:hidden">
               No projects yet.
               <br />
               Add one to get started.
+            </div>
+          )}
+
+          {sidebarSpace === "chat" && chatListEntries.length === 0 && (
+            <div className="px-2 pt-4 text-center text-xs text-muted-foreground/60 group-data-[collapsible=icon]:hidden">
+              No chats yet.
+              <br />
+              Start from Home to create the first one.
             </div>
           )}
         </SidebarGroup>
@@ -1298,58 +1620,169 @@ export default function Sidebar() {
 
       <SidebarSeparator />
       <SidebarFooter className="gap-0 p-3">
-        {addingProject ? (
-          <>
-            <p className="mb-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/70">
-              Add project
-            </p>
-            <input
-              className="mb-2 w-full rounded-md border border-border bg-secondary px-2 py-1.5 font-mono text-xs text-foreground placeholder:text-muted-foreground/40 focus:border-ring focus:outline-none"
-              placeholder="/path/to/project"
-              value={newCwd}
-              onChange={(event) => setNewCwd(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") handleAddProject();
-                if (event.key === "Escape") setAddingProject(false);
-              }}
-            />
-            {isElectron && (
-              <button
-                type="button"
-                className="mb-2 flex w-full items-center justify-center rounded-md border border-border px-2 py-1.5 text-xs text-muted-foreground transition-colors duration-150 hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={() => void handlePickFolder()}
-                disabled={isPickingFolder || isAddingProject}
-              >
-                {isPickingFolder ? "Picking folder..." : "Browse for folder"}
-              </button>
+        {appSettings.githubSidebarControllerEnabled ? (
+          <div className="mt-3">
+            {isCollapsed ? (
+              <Menu>
+                <MenuTrigger
+                  render={
+                    <button
+                      type="button"
+                      className={`flex size-8 items-center justify-center rounded-md border transition-colors duration-150 ${
+                        githubConnected
+                          ? "border-emerald-500/40 text-emerald-600 dark:text-emerald-300"
+                          : "border-border/70 text-muted-foreground/70 hover:border-ring hover:text-muted-foreground"
+                      }`}
+                      aria-label="GitHub controller"
+                    />
+                  }
+                >
+                  <GitPullRequestIcon className="size-4" />
+                </MenuTrigger>
+                <MenuPopup align="end">
+                  <MenuItem onClick={() => openGithubControllerAction("connect")}>
+                    {githubConnected ? "Reconnect GitHub account" : "Connect GitHub account"}
+                  </MenuItem>
+                  <MenuItem onClick={() => openGithubControllerAction("settings")}>
+                    Open GitHub settings
+                  </MenuItem>
+                  <MenuItem onClick={() => openGithubControllerAction("pull-requests")} disabled>
+                    Pull Requests
+                  </MenuItem>
+                  <MenuItem onClick={() => openGithubControllerAction("actions")} disabled>
+                    Actions
+                  </MenuItem>
+                  <MenuItem onClick={() => openGithubControllerAction("security")} disabled>
+                    Security
+                  </MenuItem>
+                </MenuPopup>
+              </Menu>
+            ) : (
+              <Menu>
+                <MenuTrigger
+                  render={
+                    <button
+                      type="button"
+                      className="flex w-full items-center justify-between rounded-xl border border-border/70 bg-background/55 px-3 py-2 text-left text-xs text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+                      aria-label="GitHub controller"
+                    />
+                  }
+                >
+                  <span className="inline-flex items-center gap-2">
+                    <GitPullRequestIcon className="size-3.5" />
+                    GitHub
+                  </span>
+                  <span className="text-[10px] uppercase tracking-[0.08em]">
+                    {githubConnected ? "Connected" : "Not connected"}
+                  </span>
+                </MenuTrigger>
+                <MenuPopup align="end">
+                  <MenuItem onClick={() => openGithubControllerAction("connect")}>
+                    {githubConnected ? "Reconnect GitHub account" : "Connect GitHub account"}
+                  </MenuItem>
+                  <MenuItem onClick={() => openGithubControllerAction("settings")}>
+                    Open GitHub settings
+                  </MenuItem>
+                  <MenuItem onClick={() => openGithubControllerAction("pull-requests")} disabled>
+                    Pull Requests
+                  </MenuItem>
+                  <MenuItem onClick={() => openGithubControllerAction("actions")} disabled>
+                    Actions
+                  </MenuItem>
+                  <MenuItem onClick={() => openGithubControllerAction("security")} disabled>
+                    Security
+                  </MenuItem>
+                </MenuPopup>
+              </Menu>
             )}
-            <div className="flex gap-2">
+          </div>
+        ) : null}
+
+        <div className="mt-3 flex flex-col gap-2">
+          {isCollapsed ? (
+            footerNavigationItems.map((item) => (
+              <Tooltip key={item.id}>
+                <TooltipTrigger
+                  render={
+                    <button
+                      type="button"
+                      className={`flex size-8 items-center justify-center rounded-md border transition-colors duration-150 ${
+                        item.active
+                          ? "border-border bg-accent text-foreground"
+                          : "border-border/70 text-muted-foreground/70 hover:border-ring hover:text-muted-foreground"
+                      }`}
+                      onClick={item.onClick}
+                      aria-label={item.label}
+                    />
+                  }
+                >
+                  <item.icon className="size-4" />
+                </TooltipTrigger>
+                <TooltipPopup side="right">{item.label}</TooltipPopup>
+              </Tooltip>
+            ))
+          ) : (
+            <SidebarMenu className="gap-1">
+              {footerNavigationItems.map((item) => (
+                <SidebarMenuItem key={item.id}>
+                  <SidebarMenuButton
+                    type="button"
+                    size="sm"
+                    isActive={item.active}
+                    className="text-muted-foreground/80"
+                    onClick={item.onClick}
+                  >
+                    <item.icon className="size-4" />
+                    <span>{item.shortLabel}</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              ))}
+            </SidebarMenu>
+          )}
+        </div>
+
+        <div className="mt-3">
+          {isCollapsed ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    className="flex size-8 items-center justify-center rounded-md border border-border/70 text-muted-foreground/70 transition-colors duration-150 hover:border-ring hover:text-muted-foreground"
+                    onClick={auth.signOut}
+                    aria-label="Signed in account"
+                  />
+                }
+              >
+                <UserRoundIcon className="size-4" />
+              </TooltipTrigger>
+              <TooltipPopup side="right">{auth.session?.email ?? "Signed in"}</TooltipPopup>
+            </Tooltip>
+          ) : (
+            <div className="rounded-2xl border border-border/70 bg-background/55 px-3 py-3">
+              <div className="flex items-center gap-2">
+                <div className="flex size-8 items-center justify-center rounded-full border border-border/70 bg-card/85">
+                  <UserRoundIcon className="size-4 text-foreground/90" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-[10px] font-semibold tracking-[0.18em] text-muted-foreground uppercase">
+                    Signed in
+                  </div>
+                  <div className="truncate text-sm font-medium text-foreground">
+                    {auth.session?.email}
+                  </div>
+                </div>
+              </div>
               <button
                 type="button"
-                className="flex-1 rounded-md bg-primary px-2 py-1 text-xs font-medium text-primary-foreground transition-colors duration-150 hover:bg-primary/90"
-                onClick={handleAddProject}
-                disabled={isAddingProject}
+                className="mt-3 flex w-full items-center justify-center rounded-xl border border-border/70 px-3 py-2 text-xs font-medium text-muted-foreground transition-colors duration-150 hover:border-border hover:bg-accent hover:text-foreground"
+                onClick={auth.signOut}
               >
-                {isAddingProject ? "Adding..." : "Add"}
-              </button>
-              <button
-                type="button"
-                className="flex-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground/80 transition-colors duration-150 hover:bg-secondary"
-                onClick={() => setAddingProject(false)}
-              >
-                Cancel
+                Sign out
               </button>
             </div>
-          </>
-        ) : (
-          <button
-            type="button"
-            className="flex w-full items-center justify-center gap-1 rounded-md border border-dashed border-border py-2 text-xs text-muted-foreground/70 transition-colors duration-150 hover:border-ring hover:text-muted-foreground"
-            onClick={() => setAddingProject(true)}
-          >
-            + Add project
-          </button>
-        )}
+          )}
+        </div>
       </SidebarFooter>
     </>
   );

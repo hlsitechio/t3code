@@ -125,6 +125,7 @@ const buildCmd = Command.make(
       const fs = yield* FileSystem.FileSystem;
       const repoRoot = yield* RepoRoot;
       const serverDir = path.join(repoRoot, "apps/server");
+      const webDir = path.join(repoRoot, "apps/web");
 
       yield* Effect.log("[cli] Running tsdown...");
       yield* runCommand(
@@ -137,8 +138,21 @@ const buildCmd = Command.make(
 
       const webDist = path.join(repoRoot, "apps/web/dist");
       const clientTarget = path.join(serverDir, "dist/client");
+      let webDistExists = yield* fs.exists(webDist);
 
-      if (yield* fs.exists(webDist)) {
+      if (!webDistExists) {
+        yield* Effect.log("[cli] Web dist not found — building web app...");
+        yield* runCommand(
+          ChildProcess.make({
+            cwd: webDir,
+            stdout: config.verbose ? "inherit" : "ignore",
+            stderr: "inherit",
+          })`bun run build`,
+        );
+        webDistExists = yield* fs.exists(webDist);
+      }
+
+      if (webDistExists) {
         yield* fs.copy(webDist, clientTarget);
         yield* applyDevelopmentIconOverrides(repoRoot, serverDir);
         yield* Effect.log("[cli] Bundled web app into dist/client");

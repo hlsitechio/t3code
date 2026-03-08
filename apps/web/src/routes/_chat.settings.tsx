@@ -1,17 +1,33 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { useCallback, useState } from "react";
-import { type ProviderKind } from "@t3tools/contracts";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { type ProviderKind, type ServerCliInstallation } from "@t3tools/contracts";
 import { getModelOptions, normalizeModelSlug } from "@t3tools/shared/model";
-import { ZapIcon } from "lucide-react";
+import {
+  BotIcon,
+  GitPullRequestIcon,
+  KeyboardIcon,
+  LayoutTemplateIcon,
+  MessageSquareTextIcon,
+  PaletteIcon,
+  SearchIcon,
+  ShieldCheckIcon,
+  SquareStackIcon,
+  ZapIcon,
+} from "lucide-react";
 
 import {
   APP_SERVICE_TIER_OPTIONS,
+  CANVAS_DEFAULT_TAB_OPTIONS,
+  CANVAS_PREVIEW_DEVICE_OPTIONS,
+  GITHUB_AUTH_MODE_OPTIONS,
   MAX_CUSTOM_MODEL_LENGTH,
   shouldShowFastTierIcon,
   useAppSettings,
 } from "../appSettings";
+import WorkspaceSurfaceActions from "../components/WorkspaceSurfaceActions";
 import { isElectron } from "../env";
+import { useWorkspaceSurfaceLaunchers } from "../hooks/useWorkspaceSurfaceLaunchers";
 import { useTheme } from "../hooks/useTheme";
 import { serverConfigQueryOptions } from "../lib/serverReactQuery";
 import { ensureNativeApi } from "../nativeApi";
@@ -86,24 +102,324 @@ function patchCustomModels(provider: ProviderKind, models: string[]) {
   }
 }
 
+const SETTINGS_SECTIONS = [
+  {
+    id: "appearance",
+    title: "Appearance",
+    description: "Theme, look and feel",
+    icon: PaletteIcon,
+    keywords: ["theme", "appearance", "light", "dark", "system"],
+  },
+  {
+    id: "codex",
+    title: "Codex App Server",
+    description: "Binary and CODEX_HOME overrides",
+    icon: BotIcon,
+    keywords: ["codex", "binary", "home", "server", "path"],
+  },
+  {
+    id: "canvas",
+    title: "Canvas",
+    description: "Generated app surface defaults",
+    icon: LayoutTemplateIcon,
+    keywords: ["canvas", "preview", "react", "app", "device"],
+  },
+  {
+    id: "models",
+    title: "Models",
+    description: "Model slugs and service tier",
+    icon: SquareStackIcon,
+    keywords: ["models", "service tier", "codex", "slug"],
+  },
+  {
+    id: "github",
+    title: "GitHub",
+    description: "Auth, PR, actions and security defaults",
+    icon: GitPullRequestIcon,
+    keywords: ["github", "token", "actions", "pull request", "security", "workflow"],
+  },
+  {
+    id: "responses",
+    title: "Responses",
+    description: "Streaming behavior",
+    icon: MessageSquareTextIcon,
+    keywords: ["responses", "streaming", "assistant"],
+  },
+  {
+    id: "keybindings",
+    title: "Keybindings",
+    description: "Open and edit keybindings.json",
+    icon: KeyboardIcon,
+    keywords: ["keybindings", "shortcuts", "editor"],
+  },
+  {
+    id: "safety",
+    title: "Safety",
+    description: "Destructive action guardrails",
+    icon: ShieldCheckIcon,
+    keywords: ["safety", "delete", "confirm", "guardrails"],
+  },
+] as const;
+
+type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]["id"];
+const SETTINGS_TARGET_SECTION_STORAGE_KEY = "t3code:settings-target-section";
+
+function readPendingSettingsSectionTarget(): SettingsSectionId | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.localStorage.getItem(SETTINGS_TARGET_SECTION_STORAGE_KEY);
+  if (raw !== null) {
+    window.localStorage.removeItem(SETTINGS_TARGET_SECTION_STORAGE_KEY);
+  }
+  return SETTINGS_SECTIONS.some((section) => section.id === raw)
+    ? (raw as SettingsSectionId)
+    : null;
+}
+
+function matchesSettingsSection(query: string, section: (typeof SETTINGS_SECTIONS)[number]): boolean {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) {
+    return true;
+  }
+
+  return [section.title, section.description, ...section.keywords].some((value) =>
+    value.toLowerCase().includes(normalizedQuery),
+  );
+}
+
+function GithubSettingToggle(props: {
+  label: string;
+  description: string;
+  checked: boolean;
+  onCheckedChange: (checked: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
+      <div>
+        <p className="text-sm font-medium text-foreground">{props.label}</p>
+        <p className="text-xs text-muted-foreground">{props.description}</p>
+      </div>
+      <Switch
+        checked={props.checked}
+        onCheckedChange={(checked) => props.onCheckedChange(Boolean(checked))}
+        aria-label={props.label}
+      />
+    </div>
+  );
+}
+
+function CliBinaryControl(props: {
+  title: string;
+  pathValue: string;
+  argsValue: string;
+  onPathChange: (value: string) => void;
+  onArgsChange: (value: string) => void;
+  detectedPath: string | null;
+  detectedVersion: string | null;
+  isScanning: boolean;
+  onScan: () => void;
+}) {
+  return (
+    <div className="rounded-lg border border-border bg-background p-3">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <p className="text-sm font-medium text-foreground">{props.title}</p>
+        <Button size="xs" variant="outline" onClick={props.onScan} disabled={props.isScanning}>
+          {props.isScanning ? "Scanning..." : "Scan installation"}
+        </Button>
+      </div>
+      <div className="grid gap-3 md:grid-cols-2">
+        <label className="block space-y-1">
+          <span className="text-xs font-medium text-foreground">Binary path</span>
+          <Input
+            value={props.pathValue}
+            onChange={(event) => props.onPathChange(event.target.value)}
+            placeholder="auto from PATH"
+            spellCheck={false}
+          />
+        </label>
+        <label className="block space-y-1">
+          <span className="text-xs font-medium text-foreground">Default args</span>
+          <Input
+            value={props.argsValue}
+            onChange={(event) => props.onArgsChange(event.target.value)}
+            placeholder="--no-color"
+            spellCheck={false}
+          />
+        </label>
+      </div>
+      <p className="mt-2 text-xs text-muted-foreground">
+        {props.detectedPath
+          ? `Detected: ${props.detectedPath}${props.detectedVersion ? ` (${props.detectedVersion})` : ""}`
+          : "No detected installation yet. Use scan or provide path manually."}
+      </p>
+    </div>
+  );
+}
+
+function GitHubDeviceFlowConnect(props: { onTokenReceived: (token: string) => void }) {
+  const [status, setStatus] = useState<"idle" | "loading" | "code" | "polling" | "success" | "error">("idle");
+  const [userCode, setUserCode] = useState("");
+  const [verificationUri, setVerificationUri] = useState("");
+  const [errorMessage, setErrorMessage] = useState("");
+
+  const startFlow = useCallback(async () => {
+    setStatus("loading");
+    setErrorMessage("");
+    try {
+      const api = ensureNativeApi();
+      const result = await api.github.startDeviceFlow();
+      setUserCode(result.userCode);
+      setVerificationUri(result.verificationUri);
+      setStatus("code");
+
+      // Open the verification page in the browser
+      void api.shell.openExternal(result.verificationUri).catch(() => undefined);
+
+      // Start polling in background
+      setStatus("polling");
+      const tokenResult = await api.github.pollDeviceFlow({
+        deviceCode: result.deviceCode,
+        interval: result.interval,
+        expiresIn: result.expiresIn,
+      });
+
+      props.onTokenReceived(tokenResult.accessToken);
+      setStatus("success");
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : "Authorization failed.");
+      setStatus("error");
+    }
+  }, [props]);
+
+  if (status === "idle" || status === "error") {
+    return (
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <Button size="xs" variant="outline" onClick={() => void startFlow()}>
+            Connect GitHub account
+          </Button>
+          {status === "error" && (
+            <span className="text-xs text-destructive">{errorMessage}</span>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (status === "loading") {
+    return (
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-muted-foreground">Requesting device code...</span>
+      </div>
+    );
+  }
+
+  if (status === "success") {
+    return (
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-green-600 dark:text-green-400">
+          GitHub connected successfully! Token saved.
+        </span>
+        <Button size="xs" variant="outline" onClick={() => setStatus("idle")}>
+          Reconnect
+        </Button>
+      </div>
+    );
+  }
+
+  // status === "code" || status === "polling"
+  return (
+    <div className="rounded-lg border border-border bg-background p-3 space-y-3">
+      <p className="text-xs text-muted-foreground">
+        A browser tab has been opened. Enter this code on GitHub:
+      </p>
+      <div className="flex items-center gap-3">
+        <code className="rounded bg-muted px-3 py-1.5 text-lg font-bold tracking-widest text-foreground select-all">
+          {userCode}
+        </code>
+        <Button
+          size="xs"
+          variant="outline"
+          onClick={() => {
+            void navigator.clipboard.writeText(userCode);
+          }}
+        >
+          Copy
+        </Button>
+      </div>
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-muted-foreground">
+          {status === "polling" ? "Waiting for authorization..." : "Enter the code above on GitHub."}
+        </span>
+        <Button
+          size="xs"
+          variant="outline"
+          onClick={() => {
+            const api = ensureNativeApi();
+            void api.shell.openExternal(verificationUri).catch(() => undefined);
+          }}
+        >
+          Open GitHub
+        </Button>
+      </div>
+      <p className="text-[10px] text-muted-foreground">
+        Code expires in 15 minutes. Never share this code — it is a common phishing target.
+      </p>
+    </div>
+  );
+}
+
 function SettingsRouteView() {
   const { theme, setTheme, resolvedTheme } = useTheme();
   const { settings, defaults, updateSettings } = useAppSettings();
   const serverConfigQuery = useQuery(serverConfigQueryOptions());
+  const { codexStatus, openCanvas, openLab, openTerminal } = useWorkspaceSurfaceLaunchers();
+  const [settingsSearch, setSettingsSearch] = useState("");
+  const [activeSectionId, setActiveSectionId] = useState<SettingsSectionId>(
+    () => readPendingSettingsSectionTarget() ?? "appearance",
+  );
   const [isOpeningKeybindings, setIsOpeningKeybindings] = useState(false);
   const [openKeybindingsError, setOpenKeybindingsError] = useState<string | null>(null);
   const [customModelInputByProvider, setCustomModelInputByProvider] = useState<
     Record<ProviderKind, string>
   >({
     codex: "",
+    "claude-code": "",
+    "gemini-cli": "",
+    "github-copilot-cli": "",
   });
   const [customModelErrorByProvider, setCustomModelErrorByProvider] = useState<
     Partial<Record<ProviderKind, string | null>>
+  >({});
+  const [isScanningCliInstallations, setIsScanningCliInstallations] = useState(false);
+  const [cliInstallationsById, setCliInstallationsById] = useState<
+    Partial<Record<ServerCliInstallation["id"], ServerCliInstallation>>
   >({});
 
   const codexBinaryPath = settings.codexBinaryPath;
   const codexHomePath = settings.codexHomePath;
   const codexServiceTier = settings.codexServiceTier;
+  const githubSettingsChanged =
+    settings.githubEnabled !== defaults.githubEnabled ||
+    settings.githubAuthMode !== defaults.githubAuthMode ||
+    settings.githubToken !== defaults.githubToken ||
+    settings.githubOwner !== defaults.githubOwner ||
+    settings.githubRepo !== defaults.githubRepo ||
+    settings.githubDefaultBaseBranch !== defaults.githubDefaultBaseBranch ||
+    settings.githubWorkflowNameFilter !== defaults.githubWorkflowNameFilter ||
+    settings.githubDefaultLabels !== defaults.githubDefaultLabels ||
+    settings.githubAutoLinkIssues !== defaults.githubAutoLinkIssues ||
+    settings.githubAutoReviewOnPr !== defaults.githubAutoReviewOnPr ||
+    settings.githubActionsAutoRerunFailed !== defaults.githubActionsAutoRerunFailed ||
+    settings.githubSecurityScanOnPush !== defaults.githubSecurityScanOnPush ||
+    settings.githubRequirePassingChecks !== defaults.githubRequirePassingChecks ||
+    settings.githubCreateDraftPrByDefault !== defaults.githubCreateDraftPrByDefault ||
+    settings.githubSidebarControllerEnabled !== defaults.githubSidebarControllerEnabled ||
+    settings.githubCliPath !== defaults.githubCliPath ||
+    settings.githubCliArgs !== defaults.githubCliArgs ||
+    settings.claudeCliPath !== defaults.claudeCliPath ||
+    settings.claudeCliArgs !== defaults.claudeCliArgs ||
+    settings.geminiCliPath !== defaults.geminiCliPath ||
+    settings.geminiCliArgs !== defaults.geminiCliArgs;
   const keybindingsConfigPath = serverConfigQuery.data?.keybindingsConfigPath ?? null;
 
   const openKeybindingsFile = useCallback(() => {
@@ -122,6 +438,29 @@ function SettingsRouteView() {
         setIsOpeningKeybindings(false);
       });
   }, [keybindingsConfigPath]);
+
+  const scanCliInstallations = useCallback(async () => {
+    const api = ensureNativeApi();
+    setIsScanningCliInstallations(true);
+    try {
+      const installations = await api.server.detectCliInstallations();
+      const byId: Partial<Record<ServerCliInstallation["id"], ServerCliInstallation>> = {};
+      for (const installation of installations) {
+        byId[installation.id] = installation;
+      }
+      setCliInstallationsById(byId);
+      const github = byId["github-cli"];
+      const claude = byId["claude-cli"];
+      const gemini = byId["gemini-cli"];
+      updateSettings({
+        ...(github?.path ? { githubCliPath: github.path } : {}),
+        ...(claude?.path ? { claudeCliPath: claude.path } : {}),
+        ...(gemini?.path ? { geminiCliPath: gemini.path } : {}),
+      });
+    } finally {
+      setIsScanningCliInstallations(false);
+    }
+  }, [updateSettings]);
 
   const addCustomModel = useCallback((provider: ProviderKind) => {
     const customModelInput = customModelInputByProvider[provider];
@@ -179,27 +518,150 @@ function SettingsRouteView() {
     [settings, updateSettings],
   );
 
+  const visibleSections = useMemo(
+    () => SETTINGS_SECTIONS.filter((section) => matchesSettingsSection(settingsSearch, section)),
+    [settingsSearch],
+  );
+
+  useEffect(() => {
+    if (visibleSections.length === 0) {
+      return;
+    }
+    if (!visibleSections.some((section) => section.id === activeSectionId)) {
+      setActiveSectionId(visibleSections[0]!.id);
+    }
+  }, [activeSectionId, visibleSections]);
+
+  const activeSection = useMemo(
+    () =>
+      visibleSections.find((section) => section.id === activeSectionId) ??
+      visibleSections[0] ??
+      SETTINGS_SECTIONS[0],
+    [activeSectionId, visibleSections],
+  );
+
+  const jumpToSection = useCallback((sectionId: SettingsSectionId) => {
+    setActiveSectionId(sectionId);
+  }, []);
+
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground isolate">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground">
         {isElectron && (
-          <div className="drag-region flex h-[52px] shrink-0 items-center border-b border-border px-5">
-            <span className="text-xs font-medium tracking-wide text-muted-foreground/70">
+          <div className="drag-region grid h-[60px] shrink-0 grid-cols-[minmax(0,1fr)_minmax(18rem,32rem)_minmax(0,1fr)] items-center gap-4 border-b border-border px-5">
+            <span className="min-w-0 shrink-0 text-xs font-medium tracking-wide text-muted-foreground/70">
               Settings
             </span>
+            <div className="no-drag-region relative col-start-2 w-full">
+              <SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground/60" />
+              <Input
+                value={settingsSearch}
+                onChange={(event) => setSettingsSearch(event.target.value)}
+                placeholder="Search settings"
+                className="h-10 border-border/80 bg-card/70 pl-9"
+              />
+            </div>
+            <WorkspaceSurfaceActions
+              codexStatus={codexStatus}
+              className="no-drag-region justify-self-end"
+              onToggleTerminal={() => {
+                void openTerminal();
+              }}
+              onOpenLab={() => {
+                void openLab();
+              }}
+              onToggleCanvas={() => {
+                void openCanvas();
+              }}
+            />
           </div>
         )}
 
-        <div className="flex-1 overflow-y-auto p-6">
-          <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
-            <header className="space-y-1">
-              <h1 className="text-2xl font-semibold tracking-tight text-foreground">Settings</h1>
-              <p className="text-sm text-muted-foreground">
-                Configure app-level preferences for this device.
-              </p>
-            </header>
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          <aside className="hidden w-[260px] shrink-0 border-r border-border/70 bg-card/30 lg:block">
+            <div className="border-b border-border/70 px-4 py-3">
+              <div className="text-xs font-semibold tracking-[0.18em] text-muted-foreground uppercase">
+                Settings Tabs
+              </div>
+              <div className="mt-1 text-sm text-muted-foreground/75">
+                Navigate settings like an editor panel.
+              </div>
+            </div>
+            <div className="flex flex-col gap-1 p-3">
+              {visibleSections.map((section) => (
+                <button
+                  key={section.id}
+                  type="button"
+                  onClick={() => jumpToSection(section.id)}
+                  className={`flex items-start gap-3 rounded-xl px-3 py-2 text-left transition ${
+                    activeSectionId === section.id
+                      ? "bg-accent text-foreground"
+                      : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+                  }`}
+                >
+                  <section.icon className="mt-0.5 size-4 shrink-0" />
+                  <span className="min-w-0">
+                    <span className="block text-sm font-medium">{section.title}</span>
+                    <span className="block text-xs text-muted-foreground/80">
+                      {section.description}
+                    </span>
+                  </span>
+                </button>
+              ))}
+              {visibleSections.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-border/70 px-3 py-4 text-xs text-muted-foreground/70">
+                  No matching settings.
+                </div>
+              ) : null}
+            </div>
+          </aside>
 
-            <section className="rounded-2xl border border-border bg-card p-5">
+          <div className="flex-1 overflow-y-auto p-6">
+            <div className="mx-auto flex w-full max-w-4xl flex-col gap-6">
+              <header className="space-y-3">
+                <div className="space-y-1">
+                  <h1 className="text-2xl font-semibold tracking-tight text-foreground">Settings</h1>
+                  <p className="text-sm text-muted-foreground">
+                    Configure app-level preferences for this device.
+                  </p>
+                </div>
+                <div className="lg:hidden">
+                  <div className="flex flex-wrap gap-2">
+                    {visibleSections.map((section) => (
+                      <button
+                        key={section.id}
+                        type="button"
+                        onClick={() => jumpToSection(section.id)}
+                        className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${
+                          activeSection.id === section.id
+                            ? "border-border bg-accent text-foreground"
+                            : "border-border/70 text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+                        }`}
+                      >
+                        {section.title}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {!isElectron ? (
+                  <div className="relative w-full max-w-md">
+                    <SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground/60" />
+                    <Input
+                      value={settingsSearch}
+                      onChange={(event) => setSettingsSearch(event.target.value)}
+                      placeholder="Search settings"
+                      className="h-10 border-border/80 bg-card/70 pl-9"
+                    />
+                  </div>
+                ) : null}
+              </header>
+
+              <div key={activeSection.id} className="settings-tab-panel">
+            {activeSection.id === "appearance" ? (
+            <section
+              id="settings-appearance"
+              className="rounded-2xl border border-border bg-card p-5"
+            >
               <div className="mb-4">
                 <h2 className="text-sm font-medium text-foreground">Appearance</h2>
                 <p className="mt-1 text-xs text-muted-foreground">
@@ -241,8 +703,13 @@ function SettingsRouteView() {
                 Active theme: <span className="font-medium text-foreground">{resolvedTheme}</span>
               </p>
             </section>
+            ) : null}
 
-            <section className="rounded-2xl border border-border bg-card p-5">
+            {activeSection.id === "codex" ? (
+            <section
+              id="settings-codex"
+              className="rounded-2xl border border-border bg-card p-5"
+            >
               <div className="mb-4">
                 <h2 className="text-sm font-medium text-foreground">Codex App Server</h2>
                 <p className="mt-1 text-xs text-muted-foreground">
@@ -299,8 +766,98 @@ function SettingsRouteView() {
                 </div>
               </div>
             </section>
+            ) : null}
 
-            <section className="rounded-2xl border border-border bg-card p-5">
+            {activeSection.id === "canvas" ? (
+            <section
+              id="settings-canvas"
+              className="rounded-2xl border border-border bg-card p-5"
+            >
+              <div className="mb-4">
+                <h2 className="text-sm font-medium text-foreground">Canvas</h2>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Control how the in-app app canvas opens and previews generated React work.
+                </p>
+              </div>
+
+              <div className="space-y-5">
+                <label className="block space-y-1">
+                  <span className="text-xs font-medium text-foreground">Default canvas tab</span>
+                  <Select
+                    items={CANVAS_DEFAULT_TAB_OPTIONS.map((option) => ({
+                      label: option.label,
+                      value: option.value,
+                    }))}
+                    value={settings.canvasDefaultTab}
+                    onValueChange={(value) => {
+                      if (!value) return;
+                      updateSettings({ canvasDefaultTab: value });
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectPopup alignItemWithTrigger={false}>
+                      {CANVAS_DEFAULT_TAB_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectPopup>
+                  </Select>
+                </label>
+
+                <label className="block space-y-1">
+                  <span className="text-xs font-medium text-foreground">Preview device</span>
+                  <Select
+                    items={CANVAS_PREVIEW_DEVICE_OPTIONS.map((option) => ({
+                      label: option.label,
+                      value: option.value,
+                    }))}
+                    value={settings.canvasPreviewDevice}
+                    onValueChange={(value) => {
+                      if (!value) return;
+                      updateSettings({ canvasPreviewDevice: value });
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectPopup alignItemWithTrigger={false}>
+                      {CANVAS_PREVIEW_DEVICE_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectPopup>
+                  </Select>
+                </label>
+
+                <div className="flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
+                  <div>
+                    <p className="text-sm font-medium text-foreground">Auto-open canvas on update</p>
+                    <p className="text-xs text-muted-foreground">
+                      When the agent updates the canvas state, keep the canvas surface ready in chat.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={settings.canvasAutoOpenOnUpdate}
+                    onCheckedChange={(checked) =>
+                      updateSettings({
+                        canvasAutoOpenOnUpdate: Boolean(checked),
+                      })
+                    }
+                    aria-label="Auto-open canvas on update"
+                  />
+                </div>
+              </div>
+            </section>
+            ) : null}
+            {activeSection.id === "models" ? (
+            <section
+              id="settings-models"
+              className="rounded-2xl border border-border bg-card p-5"
+            >
               <div className="mb-4">
                 <h2 className="text-sm font-medium text-foreground">Models</h2>
                 <p className="mt-1 text-xs text-muted-foreground">
@@ -475,8 +1032,303 @@ function SettingsRouteView() {
                 })}
               </div>
             </section>
+            ) : null}
 
-            <section className="rounded-2xl border border-border bg-card p-5">
+            {activeSection.id === "github" ? (
+            <section
+              id="settings-github"
+              className="rounded-2xl border border-border bg-card p-5"
+            >
+              <div className="mb-4">
+                <h2 className="text-sm font-medium text-foreground">GitHub Integration</h2>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Configure account connection, repository defaults, PR behavior, actions, and security checks.
+                </p>
+              </div>
+
+              <div className="space-y-5">
+                <div className="flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
+                  <div>
+                    <p className="text-sm font-medium text-foreground">Enable GitHub integration</p>
+                    <p className="text-xs text-muted-foreground">Turns on GitHub controls in chat and sidebar.</p>
+                  </div>
+                  <Switch
+                    checked={settings.githubEnabled}
+                    onCheckedChange={(checked) => updateSettings({ githubEnabled: Boolean(checked) })}
+                    aria-label="Enable GitHub integration"
+                  />
+                </div>
+
+                <label className="block space-y-1">
+                  <span className="text-xs font-medium text-foreground">Authentication mode</span>
+                  <Select
+                    items={GITHUB_AUTH_MODE_OPTIONS.map((option) => ({
+                      label: option.label,
+                      value: option.value,
+                    }))}
+                    value={settings.githubAuthMode}
+                    onValueChange={(value) => {
+                      if (!value) return;
+                      updateSettings({ githubAuthMode: value });
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectPopup alignItemWithTrigger={false}>
+                      {GITHUB_AUTH_MODE_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectPopup>
+                  </Select>
+                </label>
+
+                <label className="block space-y-1">
+                  <span className="text-xs font-medium text-foreground">GitHub token</span>
+                  <Input
+                    type="password"
+                    value={settings.githubToken}
+                    onChange={(event) => updateSettings({ githubToken: event.target.value })}
+                    placeholder="ghp_xxx..."
+                    spellCheck={false}
+                  />
+                </label>
+
+                <GitHubDeviceFlowConnect
+                  onTokenReceived={(token) => {
+                    updateSettings({ githubToken: token });
+                  }}
+                />
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    onClick={() => {
+                      void scanCliInstallations();
+                    }}
+                    disabled={isScanningCliInstallations}
+                  >
+                    {isScanningCliInstallations ? "Checking..." : "Verify GitHub connection"}
+                  </Button>
+                  <span className="text-xs text-muted-foreground">
+                    {(() => {
+                      const githubCli = cliInstallationsById["github-cli"];
+                      if (!githubCli) return "Not checked yet.";
+                      if (!githubCli.found) return "GitHub CLI not found.";
+                      if (githubCli.authenticated === false) return "GitHub CLI found but not authenticated.";
+                      if (githubCli.authenticated === true) return "GitHub CLI authenticated.";
+                      return "GitHub CLI found.";
+                    })()}
+                  </span>
+                </div>
+
+                <div className="grid gap-4 md:grid-cols-2">
+                  <label className="block space-y-1">
+                    <span className="text-xs font-medium text-foreground">Repository owner</span>
+                    <Input
+                      value={settings.githubOwner}
+                      onChange={(event) => updateSettings({ githubOwner: event.target.value })}
+                      placeholder="your-org"
+                      spellCheck={false}
+                    />
+                  </label>
+                  <label className="block space-y-1">
+                    <span className="text-xs font-medium text-foreground">Repository name</span>
+                    <Input
+                      value={settings.githubRepo}
+                      onChange={(event) => updateSettings({ githubRepo: event.target.value })}
+                      placeholder="your-repo"
+                      spellCheck={false}
+                    />
+                  </label>
+                </div>
+
+                <div className="grid gap-4 md:grid-cols-2">
+                  <label className="block space-y-1">
+                    <span className="text-xs font-medium text-foreground">Default base branch</span>
+                    <Input
+                      value={settings.githubDefaultBaseBranch}
+                      onChange={(event) =>
+                        updateSettings({ githubDefaultBaseBranch: event.target.value })
+                      }
+                      placeholder="main"
+                      spellCheck={false}
+                    />
+                  </label>
+                  <label className="block space-y-1">
+                    <span className="text-xs font-medium text-foreground">Workflow name filter</span>
+                    <Input
+                      value={settings.githubWorkflowNameFilter}
+                      onChange={(event) =>
+                        updateSettings({ githubWorkflowNameFilter: event.target.value })
+                      }
+                      placeholder="ci | build | deploy"
+                      spellCheck={false}
+                    />
+                  </label>
+                </div>
+
+                <label className="block space-y-1">
+                  <span className="text-xs font-medium text-foreground">Default PR labels</span>
+                  <Input
+                    value={settings.githubDefaultLabels}
+                    onChange={(event) => updateSettings({ githubDefaultLabels: event.target.value })}
+                    placeholder="ai-generated, needs-review"
+                    spellCheck={false}
+                  />
+                  <span className="text-xs text-muted-foreground">Comma-separated labels.</span>
+                </label>
+
+                <div className="grid gap-2 md:grid-cols-2">
+                  <GithubSettingToggle
+                    label="Auto-link issues in PR body"
+                    description="Attach issue references when creating pull requests."
+                    checked={settings.githubAutoLinkIssues}
+                    onCheckedChange={(checked) =>
+                      updateSettings({ githubAutoLinkIssues: Boolean(checked) })
+                    }
+                  />
+                  <GithubSettingToggle
+                    label="Auto-request review on PR"
+                    description="Request review immediately after PR creation."
+                    checked={settings.githubAutoReviewOnPr}
+                    onCheckedChange={(checked) =>
+                      updateSettings({ githubAutoReviewOnPr: Boolean(checked) })
+                    }
+                  />
+                  <GithubSettingToggle
+                    label="Auto-rerun failed Actions"
+                    description="Retry failed workflows one time."
+                    checked={settings.githubActionsAutoRerunFailed}
+                    onCheckedChange={(checked) =>
+                      updateSettings({ githubActionsAutoRerunFailed: Boolean(checked) })
+                    }
+                  />
+                  <GithubSettingToggle
+                    label="Run security scan on push"
+                    description="Trigger code scanning after each push."
+                    checked={settings.githubSecurityScanOnPush}
+                    onCheckedChange={(checked) =>
+                      updateSettings({ githubSecurityScanOnPush: Boolean(checked) })
+                    }
+                  />
+                  <GithubSettingToggle
+                    label="Require passing checks"
+                    description="Block merge flow until checks are green."
+                    checked={settings.githubRequirePassingChecks}
+                    onCheckedChange={(checked) =>
+                      updateSettings({ githubRequirePassingChecks: Boolean(checked) })
+                    }
+                  />
+                  <GithubSettingToggle
+                    label="Create draft PR by default"
+                    description="Open pull requests as draft first."
+                    checked={settings.githubCreateDraftPrByDefault}
+                    onCheckedChange={(checked) =>
+                      updateSettings({ githubCreateDraftPrByDefault: Boolean(checked) })
+                    }
+                  />
+                  <GithubSettingToggle
+                    label="Show sidebar GitHub controller"
+                    description="Display GitHub context controller in left sidebar."
+                    checked={settings.githubSidebarControllerEnabled}
+                    onCheckedChange={(checked) =>
+                      updateSettings({ githubSidebarControllerEnabled: Boolean(checked) })
+                    }
+                  />
+                </div>
+
+                <div className="space-y-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground/80">
+                    CLI Runtime Control
+                  </p>
+                  <CliBinaryControl
+                    title="GitHub CLI (`gh`)"
+                    pathValue={settings.githubCliPath}
+                    argsValue={settings.githubCliArgs}
+                    onPathChange={(value) => updateSettings({ githubCliPath: value })}
+                    onArgsChange={(value) => updateSettings({ githubCliArgs: value })}
+                    detectedPath={cliInstallationsById["github-cli"]?.path ?? null}
+                    detectedVersion={cliInstallationsById["github-cli"]?.version ?? null}
+                    isScanning={isScanningCliInstallations}
+                    onScan={() => {
+                      void scanCliInstallations();
+                    }}
+                  />
+                  <CliBinaryControl
+                    title="Claude CLI (`claude`)"
+                    pathValue={settings.claudeCliPath}
+                    argsValue={settings.claudeCliArgs}
+                    onPathChange={(value) => updateSettings({ claudeCliPath: value })}
+                    onArgsChange={(value) => updateSettings({ claudeCliArgs: value })}
+                    detectedPath={cliInstallationsById["claude-cli"]?.path ?? null}
+                    detectedVersion={cliInstallationsById["claude-cli"]?.version ?? null}
+                    isScanning={isScanningCliInstallations}
+                    onScan={() => {
+                      void scanCliInstallations();
+                    }}
+                  />
+                  <CliBinaryControl
+                    title="Gemini CLI (`gemini` / `gemini-cli`)"
+                    pathValue={settings.geminiCliPath}
+                    argsValue={settings.geminiCliArgs}
+                    onPathChange={(value) => updateSettings({ geminiCliPath: value })}
+                    onArgsChange={(value) => updateSettings({ geminiCliArgs: value })}
+                    detectedPath={cliInstallationsById["gemini-cli"]?.path ?? null}
+                    detectedVersion={cliInstallationsById["gemini-cli"]?.version ?? null}
+                    isScanning={isScanningCliInstallations}
+                    onScan={() => {
+                      void scanCliInstallations();
+                    }}
+                  />
+                </div>
+
+                {githubSettingsChanged ? (
+                  <div className="flex justify-end">
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      onClick={() =>
+                        updateSettings({
+                          githubEnabled: defaults.githubEnabled,
+                          githubAuthMode: defaults.githubAuthMode,
+                          githubToken: defaults.githubToken,
+                          githubOwner: defaults.githubOwner,
+                          githubRepo: defaults.githubRepo,
+                          githubDefaultBaseBranch: defaults.githubDefaultBaseBranch,
+                          githubWorkflowNameFilter: defaults.githubWorkflowNameFilter,
+                          githubDefaultLabels: defaults.githubDefaultLabels,
+                          githubAutoLinkIssues: defaults.githubAutoLinkIssues,
+                          githubAutoReviewOnPr: defaults.githubAutoReviewOnPr,
+                          githubActionsAutoRerunFailed: defaults.githubActionsAutoRerunFailed,
+                          githubSecurityScanOnPush: defaults.githubSecurityScanOnPush,
+                          githubRequirePassingChecks: defaults.githubRequirePassingChecks,
+                          githubCreateDraftPrByDefault: defaults.githubCreateDraftPrByDefault,
+                          githubSidebarControllerEnabled: defaults.githubSidebarControllerEnabled,
+                          githubCliPath: defaults.githubCliPath,
+                          githubCliArgs: defaults.githubCliArgs,
+                          claudeCliPath: defaults.claudeCliPath,
+                          claudeCliArgs: defaults.claudeCliArgs,
+                          geminiCliPath: defaults.geminiCliPath,
+                          geminiCliArgs: defaults.geminiCliArgs,
+                        })
+                      }
+                    >
+                      Reset GitHub settings
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+            </section>
+            ) : null}
+
+            {activeSection.id === "responses" ? (
+            <section
+              id="settings-responses"
+              className="rounded-2xl border border-border bg-card p-5"
+            >
               <div className="mb-4">
                 <h2 className="text-sm font-medium text-foreground">Responses</h2>
                 <p className="mt-1 text-xs text-muted-foreground">
@@ -518,8 +1370,13 @@ function SettingsRouteView() {
                 </div>
               ) : null}
             </section>
+            ) : null}
 
-            <section className="rounded-2xl border border-border bg-card p-5">
+            {activeSection.id === "keybindings" ? (
+            <section
+              id="settings-keybindings"
+              className="rounded-2xl border border-border bg-card p-5"
+            >
               <div className="mb-4">
                 <h2 className="text-sm font-medium text-foreground">Keybindings</h2>
                 <p className="mt-1 text-xs text-muted-foreground">
@@ -554,8 +1411,13 @@ function SettingsRouteView() {
                 ) : null}
               </div>
             </section>
+            ) : null}
 
-            <section className="rounded-2xl border border-border bg-card p-5">
+            {activeSection.id === "safety" ? (
+            <section
+              id="settings-safety"
+              className="rounded-2xl border border-border bg-card p-5"
+            >
               <div className="mb-4">
                 <h2 className="text-sm font-medium text-foreground">Safety</h2>
                 <p className="mt-1 text-xs text-muted-foreground">
@@ -597,6 +1459,9 @@ function SettingsRouteView() {
                 </div>
               ) : null}
             </section>
+            ) : null}
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -607,3 +1472,9 @@ function SettingsRouteView() {
 export const Route = createFileRoute("/_chat/settings")({
   component: SettingsRouteView,
 });
+
+
+
+
+
+

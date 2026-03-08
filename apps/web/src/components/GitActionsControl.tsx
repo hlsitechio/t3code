@@ -58,6 +58,13 @@ interface PendingDefaultBranchAction {
 }
 
 type GitActionToastId = ReturnType<typeof toastManager.add>;
+const GITHUB_COMING_SOON_MENU_ITEMS = [
+  "GitHub Actions",
+  "Pull Request Review",
+  "Security Code Scan",
+  "PR Auto-Comment",
+  "Issue Link + Triage",
+] as const;
 
 function getMenuActionDisabledReason(
   item: GitActionMenuItem,
@@ -679,6 +686,18 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
                   </MenuItem>
                 );
               })}
+              <p className="px-2 py-1.5 text-[11px] uppercase tracking-[0.08em] text-muted-foreground/80">
+                GitHub Integration
+              </p>
+              {GITHUB_COMING_SOON_MENU_ITEMS.map((label) => (
+                <MenuItem key={label} disabled>
+                  <GitHubIcon />
+                  {label}
+                  <span className="ms-auto text-[10px] uppercase tracking-[0.08em] text-muted-foreground/70">
+                    Coming soon
+                  </span>
+                </MenuItem>
+              ))}
               {gitStatusForActions?.branch === null && (
                 <p className="px-2 py-1.5 text-xs text-warning">
                   Detached HEAD: create and checkout a branch to enable push and PR actions.

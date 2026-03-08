@@ -7,20 +7,26 @@
  * @module Server
  */
 import http from "node:http";
+import { spawn } from "node:child_process";
 import type { Duplex } from "node:stream";
 
 import Mime from "@effect/platform-node/Mime";
 import {
+  type CanvasFile,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   type ClientOrchestrationCommand,
+  KeybindingRule,
+  MAX_SCRIPT_ID_LENGTH,
   type OrchestrationCommand,
   ORCHESTRATION_WS_CHANNELS,
   ORCHESTRATION_WS_METHODS,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
   ProjectId,
   ThreadId,
+  type ThreadCanvasState,
   TerminalEvent,
+  type ServerProviderStatus,
   WS_CHANNELS,
   WS_METHODS,
   WebSocketRequest,
@@ -34,6 +40,7 @@ import {
   Exit,
   FileSystem,
   Layer,
+  Option,
   Path,
   Ref,
   Schema,
@@ -105,6 +112,192 @@ const isServerNotRunningError = (error: unknown): boolean => {
     maybeCode === "ERR_SERVER_NOT_RUNNING" || error.message.toLowerCase().includes("not running")
   );
 };
+
+const OPERATOR_ROUTE_PATH = "/__t3_operator";
+const CANVAS_STATE_DIRECTORY = "canvas";
+
+const DEFAULT_CANVAS_FILES: readonly CanvasFile[] = [
+  {
+    path: "src/App.jsx",
+    language: "jsx",
+    contents: `export default function App() {
+  return (
+    <main className="app-shell">
+      <section className="hero-card">
+        <span className="eyebrow">T3 Canvas</span>
+        <h1>Build the next React surface here.</h1>
+        <p>
+          This canvas is separate from the Lab browser. Use it for generated UI, app concepts, and
+          interactive React previews.
+        </p>
+        <div className="hero-actions">
+          <button type="button">Primary action</button>
+          <button type="button" className="secondary">
+            Secondary action
+          </button>
+        </div>
+      </section>
+    </main>
+  );
+}
+`,
+  },
+  {
+    path: "src/styles.css",
+    language: "css",
+    contents: `.app-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 40px;
+  background:
+    radial-gradient(circle at top, rgba(90, 120, 255, 0.18), transparent 34%),
+    linear-gradient(180deg, #09090b 0%, #0f1115 100%);
+  color: #f8fafc;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+.hero-card {
+  width: min(720px, 100%);
+  padding: 32px;
+  border-radius: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(12, 14, 18, 0.88);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+}
+
+.eyebrow {
+  display: inline-flex;
+  margin-bottom: 16px;
+  border-radius: 999px;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(248, 250, 252, 0.72);
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.hero-card h1 {
+  margin: 0;
+  font-size: clamp(2rem, 4vw, 3.75rem);
+  line-height: 1.05;
+}
+
+.hero-card p {
+  margin: 16px 0 0;
+  max-width: 56ch;
+  color: rgba(248, 250, 252, 0.76);
+  line-height: 1.7;
+}
+
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 28px;
+}
+
+.hero-actions button {
+  border: 0;
+  border-radius: 999px;
+  padding: 12px 18px;
+  background: #4f46e5;
+  color: white;
+  font: inherit;
+}
+
+.hero-actions .secondary {
+  background: rgba(255, 255, 255, 0.08);
+}
+`,
+  },
+  {
+    path: "canvas.md",
+    language: "md",
+    contents:
+      "# Canvas brief\n\nDescribe the app you want here, then let the agent reshape the React files and preview.\n",
+  },
+] as const;
+
+function defaultThreadCanvasState(threadId: ThreadId): ThreadCanvasState {
+  return {
+    threadId,
+    title: "Canvas App",
+    framework: "react",
+    prompt: "",
+    files: [...DEFAULT_CANVAS_FILES],
+    lastUpdatedAt: new Date().toISOString(),
+  };
+}
+
+function canvasStatePath(stateDir: string, path: Path.Path, threadId: ThreadId): string {
+  return path.join(stateDir, CANVAS_STATE_DIRECTORY, `${threadId}.json`);
+}
+
+function normalizeProjectScriptId(value: string): string {
+  const cleaned = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (cleaned.length === 0) {
+    return "script";
+  }
+  if (cleaned.length <= MAX_SCRIPT_ID_LENGTH) {
+    return cleaned;
+  }
+  return cleaned.slice(0, MAX_SCRIPT_ID_LENGTH).replace(/-+$/g, "") || "script";
+}
+
+function nextProjectScriptId(name: string, existingIds: Iterable<string>): string {
+  const taken = new Set(Array.from(existingIds));
+  const baseId = normalizeProjectScriptId(name);
+  if (!taken.has(baseId)) return baseId;
+
+  let suffix = 2;
+  while (suffix < 10_000) {
+    const candidate = `${baseId}-${suffix}`;
+    const safeCandidate =
+      candidate.length <= MAX_SCRIPT_ID_LENGTH
+        ? candidate
+        : `${baseId.slice(0, Math.max(1, MAX_SCRIPT_ID_LENGTH - String(suffix).length - 1))}-${suffix}`;
+    if (!taken.has(safeCandidate)) {
+      return safeCandidate;
+    }
+    suffix += 1;
+  }
+
+  return `${baseId}-${Date.now()}`.slice(0, MAX_SCRIPT_ID_LENGTH);
+}
+
+function commandForProjectScript(scriptId: string): `script.${string}.run` {
+  return `script.${scriptId}.run`;
+}
+
+async function readJsonRequestBody(request: http.IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  if (chunks.length === 0) {
+    return null;
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+function writeJsonResponse(
+  response: http.ServerResponse,
+  statusCode: number,
+  body: Record<string, unknown>,
+): void {
+  const payload = JSON.stringify(body);
+  response.writeHead(statusCode, {
+    "content-type": "application/json; charset=utf-8",
+    "content-length": Buffer.byteLength(payload),
+  });
+  response.end(payload);
+}
 
 function rejectUpgrade(socket: Duplex, statusCode: number, message: string): void {
   socket.end(
@@ -202,6 +395,95 @@ function messageFromCause(cause: Cause.Cause<unknown>): string {
   return message.length > 0 ? message : Cause.pretty(cause);
 }
 
+interface CliProbeDescriptor {
+  id: "github-cli" | "claude-cli" | "gemini-cli";
+  commands: readonly string[];
+  versionArgs: readonly string[];
+}
+
+function runCommandCapture(command: string, args: readonly string[]): Promise<{
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}> {
+  return new Promise((resolve) => {
+    const child = spawn(command, [...args], { stdio: ["ignore", "pipe", "pipe"] });
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+
+    child.stdout.on("data", (chunk) => {
+      stdoutChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    child.stderr.on("data", (chunk) => {
+      stderrChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    child.on("error", () => {
+      resolve({ exitCode: -1, stdout: "", stderr: "" });
+    });
+    child.on("close", (code) => {
+      resolve({
+        exitCode: typeof code === "number" ? code : -1,
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        stderr: Buffer.concat(stderrChunks).toString("utf8"),
+      });
+    });
+  });
+}
+
+async function detectCommandPath(command: string): Promise<string | null> {
+  const locator = process.platform === "win32" ? "where.exe" : "which";
+  const result = await runCommandCapture(locator, [command]);
+  if (result.exitCode !== 0) {
+    return null;
+  }
+  const firstLine = result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  return firstLine ?? null;
+}
+
+async function detectCliInstallation(descriptor: CliProbeDescriptor): Promise<{
+  id: CliProbeDescriptor["id"];
+  found: boolean;
+  command: string;
+  path?: string;
+  version?: string;
+  authenticated?: boolean;
+  message?: string;
+}> {
+  for (const command of descriptor.commands) {
+    const foundPath = await detectCommandPath(command);
+    if (!foundPath) continue;
+    const versionResult = await runCommandCapture(foundPath, descriptor.versionArgs);
+    const versionLine = versionResult.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0);
+    let authenticated: boolean | undefined;
+    if (descriptor.id === "github-cli") {
+      const authResult = await runCommandCapture(foundPath, ["auth", "status"]);
+      authenticated = authResult.exitCode === 0;
+    }
+
+    return {
+      id: descriptor.id,
+      found: true,
+      command,
+      path: foundPath,
+      ...(versionLine ? { version: versionLine } : {}),
+      ...(authenticated !== undefined ? { authenticated } : {}),
+      ...(versionResult.exitCode !== 0 ? { message: "Found, but version check failed." } : {}),
+    };
+  }
+  return {
+    id: descriptor.id,
+    found: false,
+    command: descriptor.commands[0] ?? "unknown",
+    message: "CLI not found in PATH.",
+  };
+}
+
 export type ServerCoreRuntimeServices =
   | OrchestrationEngineService
   | ProjectionSnapshotQuery
@@ -268,7 +550,24 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     ),
   );
 
-  const providerStatuses = yield* providerHealth.getStatuses;
+  const fallbackProviderStatuses: readonly ServerProviderStatus[] = [
+    {
+      provider: "codex",
+      status: "warning",
+      available: false,
+      authStatus: "unknown",
+      checkedAt: new Date().toISOString(),
+      message: "Provider health check pending.",
+    },
+  ];
+
+  const providerStatuses = yield* providerHealth.getStatuses.pipe(
+    Effect.timeoutOption(800),
+    Effect.map((maybeStatuses) =>
+      Option.getOrElse(maybeStatuses, () => fallbackProviderStatuses),
+    ),
+    Effect.catch(() => Effect.succeed(fallbackProviderStatuses)),
+  );
 
   const clients = yield* Ref.make(new Set<WebSocket>());
   const logger = createLogger("ws");
@@ -434,6 +733,272 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     void Effect.runPromise(
       Effect.gen(function* () {
         const url = new URL(req.url ?? "/", `http://localhost:${port}`);
+        if (url.pathname === OPERATOR_ROUTE_PATH) {
+          if (req.method !== "POST") {
+            respond(405, { "Content-Type": "text/plain" }, "Method Not Allowed");
+            return;
+          }
+          const expectedAuthToken = serverConfig.authToken;
+          const authorization = req.headers.authorization;
+          if (!expectedAuthToken || authorization !== `Bearer ${expectedAuthToken}`) {
+            writeJsonResponse(res, 401, {
+              ok: false,
+              error: "Unauthorized operator request.",
+            });
+            return;
+          }
+
+          const requestBody = yield* Effect.tryPromise({
+            try: () => readJsonRequestBody(req),
+            catch: () => null,
+          });
+          if (!requestBody || typeof requestBody !== "object") {
+            writeJsonResponse(res, 400, { ok: false, error: "Invalid operator request body." });
+            return;
+          }
+
+          const method =
+            "method" in requestBody && typeof requestBody.method === "string"
+              ? requestBody.method
+              : null;
+          const params =
+            "params" in requestBody && requestBody.params && typeof requestBody.params === "object"
+              ? (requestBody.params as Record<string, unknown>)
+              : {};
+          if (!method) {
+            writeJsonResponse(res, 400, { ok: false, error: "Missing operator method." });
+            return;
+          }
+
+          const threadId =
+            typeof params.threadId === "string" && params.threadId.trim().length > 0
+              ? ThreadId.makeUnsafe(params.threadId.trim())
+              : null;
+          if (!threadId) {
+            writeJsonResponse(res, 400, { ok: false, error: "Operator request requires a threadId." });
+            return;
+          }
+
+          const snapshot = yield* projectionReadModelQuery.getSnapshot();
+          const thread = snapshot.threads.find((entry) => entry.id === threadId && entry.deletedAt === null);
+          if (!thread) {
+            writeJsonResponse(res, 404, { ok: false, error: `Unknown thread '${threadId}'.` });
+            return;
+          }
+          const project = snapshot.projects.find(
+            (entry) => entry.id === thread.projectId && entry.deletedAt === null,
+          );
+          if (!project) {
+            writeJsonResponse(res, 404, { ok: false, error: `Unknown project '${thread.projectId}'.` });
+            return;
+          }
+
+          const readOperatorCanvasState = (): Effect.Effect<ThreadCanvasState> =>
+            Effect.gen(function* () {
+              const filePath = canvasStatePath(serverConfig.stateDir, path, thread.id);
+              const persisted = yield* fileSystem.readFileString(filePath).pipe(
+                Effect.catch(() => Effect.succeed(null)),
+              );
+              if (!persisted) {
+                return defaultThreadCanvasState(thread.id);
+              }
+              try {
+                const parsed = JSON.parse(persisted) as Partial<ThreadCanvasState>;
+                return {
+                  ...defaultThreadCanvasState(thread.id),
+                  ...parsed,
+                  threadId: thread.id,
+                  lastUpdatedAt:
+                    typeof parsed.lastUpdatedAt === "string" && parsed.lastUpdatedAt.length > 0
+                      ? parsed.lastUpdatedAt
+                      : new Date().toISOString(),
+                  files: Array.isArray(parsed.files)
+                    ? parsed.files.filter(
+                        (file): file is CanvasFile =>
+                          !!file &&
+                          typeof file === "object" &&
+                          typeof file.path === "string" &&
+                          (file.language === "jsx" ||
+                            file.language === "css" ||
+                            file.language === "md") &&
+                          typeof file.contents === "string",
+                      )
+                    : [...DEFAULT_CANVAS_FILES],
+                };
+              } catch {
+                return defaultThreadCanvasState(thread.id);
+              }
+            });
+
+          const writeOperatorCanvasState = (canvasState: ThreadCanvasState) =>
+            Effect.gen(function* () {
+              const filePath = canvasStatePath(serverConfig.stateDir, path, canvasState.threadId);
+              yield* fileSystem.makeDirectory(path.dirname(filePath), { recursive: true });
+              yield* fileSystem.writeFileString(filePath, JSON.stringify(canvasState, null, 2));
+            });
+
+          switch (method) {
+            case "app.getContext": {
+              const canvas = yield* readOperatorCanvasState();
+              writeJsonResponse(res, 200, {
+                ok: true,
+                result: {
+                  thread: {
+                    id: thread.id,
+                    title: thread.title,
+                    model: thread.model,
+                    runtimeMode: thread.runtimeMode,
+                    interactionMode: thread.interactionMode,
+                  },
+                  project: {
+                    id: project.id,
+                    title: project.title,
+                    workspaceRoot: project.workspaceRoot,
+                    defaultModel: project.defaultModel,
+                    actions: project.scripts,
+                  },
+                  canvas: {
+                    title: canvas.title,
+                    framework: canvas.framework,
+                    fileCount: canvas.files.length,
+                    lastUpdatedAt: canvas.lastUpdatedAt,
+                  },
+                },
+              });
+              return;
+            }
+
+            case "actions.list": {
+              writeJsonResponse(res, 200, {
+                ok: true,
+                result: project.scripts,
+              });
+              return;
+            }
+
+            case "actions.create": {
+              const name = typeof params.name === "string" ? params.name.trim() : "";
+              const command = typeof params.command === "string" ? params.command.trim() : "";
+              const keybinding =
+                typeof params.keybinding === "string" ? params.keybinding.trim() : null;
+              const icon =
+                params.icon === "play" ||
+                params.icon === "test" ||
+                params.icon === "lint" ||
+                params.icon === "configure" ||
+                params.icon === "build" ||
+                params.icon === "debug"
+                  ? params.icon
+                  : "play";
+              const runOnWorktreeCreate = params.runOnWorktreeCreate === true;
+
+              if (name.length === 0) {
+                writeJsonResponse(res, 400, { ok: false, error: "Action name is required." });
+                return;
+              }
+              if (command.length === 0) {
+                writeJsonResponse(res, 400, { ok: false, error: "Action command is required." });
+                return;
+              }
+
+              const nextId = nextProjectScriptId(
+                name,
+                project.scripts.map((script) => script.id),
+              );
+              const nextAction = {
+                id: nextId,
+                name,
+                command,
+                icon,
+                runOnWorktreeCreate,
+              } as const;
+              const nextScripts = runOnWorktreeCreate
+                ? [
+                    ...project.scripts.map((script) =>
+                      script.runOnWorktreeCreate
+                        ? { ...script, runOnWorktreeCreate: false }
+                        : script,
+                    ),
+                    nextAction,
+                  ]
+                : [...project.scripts, nextAction];
+
+              yield* orchestrationEngine.dispatch({
+                type: "project.meta.update",
+                commandId: CommandId.makeUnsafe(crypto.randomUUID()),
+                projectId: project.id,
+                scripts: nextScripts,
+              });
+
+              if (keybinding) {
+                let keybindingRule: typeof KeybindingRule.Type;
+                try {
+                  keybindingRule = Schema.decodeUnknownSync(KeybindingRule)({
+                    key: keybinding,
+                    command: commandForProjectScript(nextId),
+                  });
+                } catch {
+                  writeJsonResponse(res, 400, { ok: false, error: "Invalid action keybinding." });
+                  return;
+                }
+                yield* keybindingsManager.upsertKeybindingRule(keybindingRule);
+              }
+
+              writeJsonResponse(res, 200, {
+                ok: true,
+                result: {
+                  projectId: project.id,
+                  action: nextAction,
+                  actionCount: nextScripts.length,
+                },
+              });
+              return;
+            }
+
+            case "canvas.getState": {
+              const canvas = yield* readOperatorCanvasState();
+              writeJsonResponse(res, 200, {
+                ok: true,
+                result: canvas,
+              });
+              return;
+            }
+
+            case "canvas.update": {
+              const existing = yield* readOperatorCanvasState();
+              const title = typeof params.title === "string" ? params.title : existing.title;
+              const prompt = typeof params.prompt === "string" ? params.prompt : existing.prompt;
+              const files = Array.isArray(params.files)
+                ? params.files.filter(
+                    (file): file is CanvasFile =>
+                      !!file &&
+                      typeof file === "object" &&
+                      typeof file.path === "string" &&
+                      (file.language === "jsx" || file.language === "css" || file.language === "md") &&
+                      typeof file.contents === "string",
+                  )
+                : existing.files;
+              const nextCanvasState: ThreadCanvasState = {
+                ...existing,
+                title,
+                prompt,
+                files: files.length > 0 ? files : existing.files,
+                lastUpdatedAt: new Date().toISOString(),
+              };
+              yield* writeOperatorCanvasState(nextCanvasState);
+              writeJsonResponse(res, 200, {
+                ok: true,
+                result: nextCanvasState,
+              });
+              return;
+            }
+
+            default: {
+              writeJsonResponse(res, 404, { ok: false, error: `Unknown operator method '${method}'.` });
+              return;
+            }
+          }
+        }
         if (tryHandleProjectFaviconRequest(url, res)) {
           return;
         }
@@ -642,7 +1207,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   let welcomeBootstrapThreadId: ThreadId | undefined;
 
   if (autoBootstrapProjectFromCwd) {
-    yield* Effect.gen(function* () {
+    const bootstrapFromCwd = Effect.gen(function* () {
       const snapshot = yield* projectionReadModelQuery.getSnapshot();
       const existingProject = snapshot.projects.find(
         (project) => project.workspaceRoot === cwd && project.deletedAt === null,
@@ -695,10 +1260,11 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         welcomeBootstrapThreadId = existingThread.id;
       }
     }).pipe(
-      Effect.mapError(
-        (cause) => new ServerLifecycleError({ operation: "autoBootstrapProject", cause }),
+      Effect.catch((cause) =>
+        Effect.logWarning("auto bootstrap from cwd failed", { cwd, cause }),
       ),
     );
+    yield* bootstrapFromCwd.pipe(Effect.forkIn(subscriptionsScope));
   }
 
   const runtimeServices = yield* Effect.services<
@@ -727,6 +1293,47 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   );
 
   const routeRequest = Effect.fnUntraced(function* (request: WebSocketRequest) {
+    const readCanvasState = Effect.fnUntraced(function* (threadId: ThreadId) {
+      const filePath = canvasStatePath(serverConfig.stateDir, path, threadId);
+      const persisted = yield* fileSystem
+        .readFileString(filePath)
+        .pipe(Effect.catch(() => Effect.succeed(null)));
+      if (!persisted) {
+        return defaultThreadCanvasState(threadId);
+      }
+      try {
+        const parsed = JSON.parse(persisted) as Partial<ThreadCanvasState>;
+        return {
+          ...defaultThreadCanvasState(threadId),
+          ...parsed,
+          threadId,
+          lastUpdatedAt:
+            typeof parsed.lastUpdatedAt === "string" && parsed.lastUpdatedAt.length > 0
+              ? parsed.lastUpdatedAt
+              : new Date().toISOString(),
+          files: Array.isArray(parsed.files)
+            ? parsed.files.filter(
+                (file): file is CanvasFile =>
+                  !!file &&
+                  typeof file === "object" &&
+                  typeof file.path === "string" &&
+                  (file.language === "jsx" || file.language === "css" || file.language === "md") &&
+                  typeof file.contents === "string",
+              )
+            : [...DEFAULT_CANVAS_FILES],
+        };
+      } catch {
+        return defaultThreadCanvasState(threadId);
+      }
+    });
+
+    const writeCanvasState = Effect.fnUntraced(function* (canvasState: ThreadCanvasState) {
+      const filePath = canvasStatePath(serverConfig.stateDir, path, canvasState.threadId);
+      yield* fileSystem.makeDirectory(path.dirname(filePath), { recursive: true });
+      yield* fileSystem.writeFileString(filePath, JSON.stringify(canvasState, null, 2));
+      return canvasState;
+    });
+
     switch (request.body._tag) {
       case ORCHESTRATION_WS_METHODS.getSnapshot:
         return yield* projectionReadModelQuery.getSnapshot();
@@ -799,6 +1406,24 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       case WS_METHODS.shellOpenInEditor: {
         const body = stripRequestTag(request.body);
         return yield* openInEditor(body);
+      }
+
+      case WS_METHODS.githubStartDeviceFlow: {
+        return yield* Effect.tryPromise({
+          try: () => import("./git/githubDeviceFlow").then((m) => m.requestGitHubDeviceCode()),
+          catch: (cause) => new Error(cause instanceof Error ? cause.message : "Device flow failed"),
+        });
+      }
+
+      case WS_METHODS.githubPollDeviceFlow: {
+        const body = stripRequestTag(request.body);
+        return yield* Effect.tryPromise({
+          try: () =>
+            import("./git/githubDeviceFlow").then((m) =>
+              m.pollGitHubDeviceFlow(body.deviceCode, body.interval, body.expiresIn),
+            ),
+          catch: (cause) => new Error(cause instanceof Error ? cause.message : "Polling failed"),
+        });
       }
 
       case WS_METHODS.gitStatus: {
@@ -893,6 +1518,52 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         return { keybindings: keybindingsConfig, issues: [] };
       }
 
+      case WS_METHODS.serverDetectCliInstallations: {
+        return yield* Effect.tryPromise({
+          try: async () => {
+            const probes: readonly CliProbeDescriptor[] = [
+              {
+                id: "github-cli",
+                commands: ["gh"],
+                versionArgs: ["--version"],
+              },
+              {
+                id: "claude-cli",
+                commands: ["claude"],
+                versionArgs: ["--version"],
+              },
+              {
+                id: "gemini-cli",
+                commands: ["gemini", "gemini-cli"],
+                versionArgs: ["--version"],
+              },
+            ];
+            return Promise.all(probes.map((probe) => detectCliInstallation(probe)));
+          },
+          catch: (cause) =>
+            new RouteRequestError({
+              message: `Failed to detect CLI installations: ${String(cause)}`,
+            }),
+        });
+      }
+
+      case WS_METHODS.canvasGetState: {
+        const body = stripRequestTag(request.body);
+        return yield* readCanvasState(body.threadId);
+      }
+
+      case WS_METHODS.canvasUpsertState: {
+        const body = stripRequestTag(request.body);
+        const existing = yield* readCanvasState(body.threadId);
+        return yield* writeCanvasState({
+          ...existing,
+          ...(typeof body.title === "string" ? { title: body.title } : {}),
+          ...(typeof body.prompt === "string" ? { prompt: body.prompt } : {}),
+          ...(body.files ? { files: body.files } : {}),
+          lastUpdatedAt: new Date().toISOString(),
+        });
+      }
+
       default: {
         const _exhaustiveCheck: never = request.body;
         return yield* new RouteRequestError({
@@ -915,7 +1586,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       return;
     }
 
-    const request = Schema.decodeExit(Schema.fromJsonString(WebSocketRequest))(messageText);
+    const request = Schema.decodeUnknownExit(Schema.fromJsonString(WebSocketRequest))(messageText);
     if (request._tag === "Failure") {
       const errorResponse = yield* encodeResponse({
         id: "unknown",

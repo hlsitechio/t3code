@@ -640,22 +640,29 @@ describe("deriveActiveWorkStartedAt", () => {
 });
 
 describe("PROVIDER_OPTIONS", () => {
-  it("keeps Claude Code and Cursor visible as unavailable placeholders in the stack base", () => {
-    const claude = PROVIDER_OPTIONS.find((option) => option.value === "claudeCode");
-    const cursor = PROVIDER_OPTIONS.find((option) => option.value === "cursor");
+  it("keeps CLI providers visible as unavailable placeholders in the picker", () => {
+    const claude = PROVIDER_OPTIONS.find((option) => option.value === "claude-code");
+    const gemini = PROVIDER_OPTIONS.find((option) => option.value === "gemini-cli");
+    const copilot = PROVIDER_OPTIONS.find((option) => option.value === "github-copilot-cli");
     expect(PROVIDER_OPTIONS).toEqual([
       { value: "codex", label: "Codex", available: true },
-      { value: "claudeCode", label: "Claude Code", available: false },
-      { value: "cursor", label: "Cursor", available: false },
+      { value: "claude-code", label: "Claude Code", available: false },
+      { value: "gemini-cli", label: "Gemini CLI", available: false },
+      { value: "github-copilot-cli", label: "GitHub Copilot CLI", available: false },
     ]);
     expect(claude).toEqual({
-      value: "claudeCode",
+      value: "claude-code",
       label: "Claude Code",
       available: false,
     });
-    expect(cursor).toEqual({
-      value: "cursor",
-      label: "Cursor",
+    expect(gemini).toEqual({
+      value: "gemini-cli",
+      label: "Gemini CLI",
+      available: false,
+    });
+    expect(copilot).toEqual({
+      value: "github-copilot-cli",
+      label: "GitHub Copilot CLI",
       available: false,
     });
   });

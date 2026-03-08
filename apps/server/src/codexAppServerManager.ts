@@ -1,7 +1,11 @@
 import { type ChildProcessWithoutNullStreams, spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import readline from "node:readline";
+import { fileURLToPath } from "node:url";
 
 import {
   ApprovalRequestId,
@@ -71,6 +75,7 @@ interface CodexSessionContext {
   pendingApprovals: Map<ApprovalRequestId, PendingApprovalRequest>;
   pendingUserInputs: Map<ApprovalRequestId, PendingUserInputRequest>;
   nextRequestId: number;
+  managedCodexHomePath?: string;
   stopping: boolean;
 }
 
@@ -542,7 +547,10 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
 
       const codexOptions = readCodexProviderOptions(input);
       const codexBinaryPath = codexOptions.binaryPath ?? "codex";
-      const codexHomePath = codexOptions.homePath;
+      const codexHomePath = await prepareManagedCodexHome({
+        ...(codexOptions.homePath ? { baseHomePath: codexOptions.homePath } : {}),
+        threadId,
+      });
       this.assertSupportedCodexCliVersion({
         binaryPath: codexBinaryPath,
         cwd: resolvedCwd,
@@ -572,6 +580,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         pendingApprovals: new Map(),
         pendingUserInputs: new Map(),
         nextRequestId: 1,
+        ...(codexHomePath ? { managedCodexHomePath: codexHomePath } : {}),
         stopping: false,
       };
 
@@ -998,6 +1007,9 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       activeTurnId: undefined,
     });
     this.emitLifecycleEvent(context, "session/closed", "Session stopped");
+    if (context.managedCodexHomePath) {
+      void rm(context.managedCodexHomePath, { recursive: true, force: true }).catch(() => undefined);
+    }
     this.sessions.delete(threadId);
   }
 
@@ -1564,6 +1576,142 @@ function assertSupportedCodexCliVersion(input: {
   if (parsedVersion && !isCodexCliVersionSupported(parsedVersion)) {
     throw new Error(formatCodexCliUpgradeMessage(parsedVersion));
   }
+}
+
+function currentRuntimeScriptPath(basename: string): string {
+  const currentFilePath = fileURLToPath(import.meta.url);
+  const extension = path.extname(currentFilePath);
+  return path.join(path.dirname(currentFilePath), `${basename}${extension}`);
+}
+
+function tomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function tomlStringArray(values: readonly string[]): string {
+  return `[${values.map((value) => tomlString(value)).join(", ")}]`;
+}
+
+function resolveMcpLauncher(scriptPath: string): { command: string; args: string[] } {
+  if (process.versions.bun) {
+    return {
+      command: process.execPath,
+      args: ["run", scriptPath],
+    };
+  }
+
+  return {
+    command: process.execPath,
+    args: [scriptPath],
+  };
+}
+
+function readDesktopBrowserOperatorEnv():
+  | { readonly url: string; readonly token: string }
+  | null {
+  const url = process.env.T3CODE_DESKTOP_OPERATOR_URL?.trim();
+  const token = process.env.T3CODE_DESKTOP_OPERATOR_TOKEN?.trim();
+  if (!url || !token) {
+    return null;
+  }
+  return { url, token };
+}
+
+function readAppOperatorEnv():
+  | { readonly url: string; readonly token: string }
+  | null {
+  const port = process.env.T3CODE_PORT?.trim();
+  const token = process.env.T3CODE_AUTH_TOKEN?.trim();
+  const host = process.env.T3CODE_HOST?.trim() || "127.0.0.1";
+  if (!port || !token) {
+    return null;
+  }
+  return {
+    url: `http://${host}:${port}/__t3_operator`,
+    token,
+  };
+}
+
+async function maybeReadFile(pathLike: string): Promise<string | null> {
+  try {
+    return await readFile(pathLike, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+async function prepareManagedCodexHome(input: {
+  baseHomePath?: string;
+  threadId: ThreadId;
+}): Promise<string | undefined> {
+  const desktopBrowserOperator = readDesktopBrowserOperatorEnv();
+  const appOperator = readAppOperatorEnv();
+
+  if (!desktopBrowserOperator && !appOperator) {
+    return input.baseHomePath;
+  }
+
+  const baseHomePath =
+    input.baseHomePath?.trim() || process.env.CODEX_HOME?.trim() || path.join(os.homedir(), ".codex");
+  const managedRoot = await mkdtemp(path.join(os.tmpdir(), "t3code-codex-home-"));
+
+  try {
+    await cp(baseHomePath, managedRoot, {
+      recursive: true,
+      force: true,
+      errorOnExist: false,
+    });
+  } catch {
+    // Start from an empty managed home when there is no existing Codex home to copy.
+  }
+
+  const existingConfig = (await maybeReadFile(path.join(managedRoot, "config.toml"))) ?? "";
+  const mcpSections: string[] = [];
+
+  if (desktopBrowserOperator) {
+    const scriptPath = currentRuntimeScriptPath("labBrowserMcpServer");
+    const launcher = resolveMcpLauncher(scriptPath);
+    mcpSections.push(
+      [
+        "[mcp_servers.t3_lab_browser]",
+        `command = ${tomlString(launcher.command)}`,
+        `args = ${tomlStringArray([
+          ...launcher.args,
+          "--operator-url",
+          desktopBrowserOperator.url,
+          "--operator-token",
+          desktopBrowserOperator.token,
+          "--thread-id",
+          input.threadId,
+        ])}`,
+      ].join("\n"),
+    );
+  }
+
+  if (appOperator) {
+    const scriptPath = currentRuntimeScriptPath("appOperatorMcpServer");
+    const launcher = resolveMcpLauncher(scriptPath);
+    mcpSections.push(
+      [
+        "[mcp_servers.t3_app_operator]",
+        `command = ${tomlString(launcher.command)}`,
+        `args = ${tomlStringArray([
+          ...launcher.args,
+          "--server-url",
+          appOperator.url,
+          "--server-token",
+          appOperator.token,
+          "--thread-id",
+          input.threadId,
+        ])}`,
+      ].join("\n"),
+    );
+  }
+
+  const nextConfig = [existingConfig.trimEnd(), ...mcpSections].filter((part) => part.length > 0).join("\n\n");
+  await writeFile(path.join(managedRoot, "config.toml"), `${nextConfig}\n`, "utf8");
+
+  return managedRoot;
 }
 
 function readResumeCursorThreadId(resumeCursor: unknown): string | undefined {

@@ -123,7 +123,7 @@ const CliEnvConfig = Config.all({
 });
 
 const resolveBooleanFlag = (flag: Option.Option<boolean>, envValue: boolean) =>
-  Option.getOrElse(Option.filter(flag, Boolean), () => envValue);
+  Option.getOrElse(flag, () => envValue);
 
 const ServerConfigLive = (input: CliInput) =>
   Layer.effect(
@@ -164,7 +164,7 @@ const ServerConfigLive = (input: CliInput) =>
       );
       const logWebSocketEvents = resolveBooleanFlag(
         input.logWebSocketEvents,
-        env.logWebSocketEvents ?? Boolean(devUrl),
+        env.logWebSocketEvents ?? false,
       );
       const staticDir = devUrl ? undefined : yield* cliConfig.resolveStaticDir;
       const { join } = yield* Path.Path;

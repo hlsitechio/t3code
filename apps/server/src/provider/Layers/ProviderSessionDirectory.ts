@@ -25,7 +25,12 @@ function decodeProviderKind(
   providerName: string,
   operation: string,
 ): Effect.Effect<ProviderKind, ProviderSessionDirectoryPersistenceError> {
-  if (providerName === "codex") {
+  if (
+    providerName === "codex" ||
+    providerName === "claude-code" ||
+    providerName === "gemini-cli" ||
+    providerName === "github-copilot-cli"
+  ) {
     return Effect.succeed(providerName);
   }
   return Effect.fail(

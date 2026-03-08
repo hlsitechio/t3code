@@ -52,7 +52,11 @@ import { projectSearchEntriesQueryOptions } from "~/lib/projectReactQuery";
 import { serverConfigQueryOptions, serverQueryKeys } from "~/lib/serverReactQuery";
 
 import { isElectron } from "../env";
-import { parseDiffRouteSearch, stripDiffSearchParams } from "../diffRouteSearch";
+import {
+  parseDiffRouteSearch,
+  stripCanvasSearchParams,
+  stripDiffSearchParams,
+} from "../diffRouteSearch";
 import {
   type ComposerSlashCommand,
   type ComposerTrigger,
@@ -135,6 +139,7 @@ import {
   DiffIcon,
   EllipsisIcon,
   FolderClosedIcon,
+  PaperclipIcon,
   LockIcon,
   LockOpenIcon,
   Undo2Icon,
@@ -142,6 +147,7 @@ import {
   CopyIcon,
   CheckIcon,
   ZapIcon,
+  MinusIcon,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -167,7 +173,6 @@ import {
   Gemini,
   Icon,
   OpenAI,
-  OpenCodeIcon,
   VisualStudioCode,
   Zed,
 } from "./Icons";
@@ -218,6 +223,8 @@ import { selectThreadTerminalState, useTerminalStateStore } from "../terminalSta
 import { clamp } from "effect/Number";
 import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "./ComposerPromptEditor";
 import { estimateTimelineMessageHeight } from "./timelineHeight";
+import { parseUiCommandIntent } from "../uiCommandIntents";
+import WorkspaceSurfaceActions from "./WorkspaceSurfaceActions";
 
 function formatMessageMeta(createdAt: string, duration: string | null): string {
   if (!duration) return formatTimestamp(createdAt);
@@ -265,6 +272,156 @@ const COMPOSER_PATH_QUERY_DEBOUNCE_MS = 120;
 const SCRIPT_TERMINAL_COLS = 120;
 const SCRIPT_TERMINAL_ROWS = 30;
 const WORKTREE_BRANCH_PREFIX = "t3code";
+const COMPOSER_DOCUMENTS_STORAGE_KEY = "t3code:composer-documents:v1";
+const DOCUMENT_ACCEPT_TYPES =
+  ".txt,.md,.markdown,.pdf,.docx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const MAX_DOCUMENT_BYTES = 8 * 1024 * 1024;
+const MAX_COMPOSER_DOCUMENTS_PER_THREAD = 16;
+const MAX_DOCUMENT_CONTEXT_CHARS = 32_000;
+const MAX_DOCUMENT_CONTEXT_CHARS_PER_FILE = 12_000;
+const DOCUMENT_ONLY_BOOTSTRAP_PROMPT =
+  "[User attached one or more documents without additional text. Respond using the conversation context and the attached document content.]";
+
+interface ComposerDocument {
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  extractedText: string;
+}
+
+function normalizeDocumentText(value: string): string {
+  return value.replace(/\r\n/g, "\n").trim();
+}
+
+function readComposerDocumentsFromStorage(): Record<string, ComposerDocument[]> {
+  if (typeof window === "undefined") {
+    return {};
+  }
+  try {
+    const raw = window.localStorage.getItem(COMPOSER_DOCUMENTS_STORAGE_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const normalized: Record<string, ComposerDocument[]> = {};
+    for (const [threadId, value] of Object.entries(parsed)) {
+      if (!Array.isArray(value)) continue;
+      const docs = value
+        .flatMap((entry) => {
+          if (!entry || typeof entry !== "object") return [];
+          const candidate = entry as Record<string, unknown>;
+          const id = candidate.id;
+          const name = candidate.name;
+          const mimeType = candidate.mimeType;
+          const sizeBytes = candidate.sizeBytes;
+          const extractedText = candidate.extractedText;
+          if (
+            typeof id !== "string" ||
+            typeof name !== "string" ||
+            typeof mimeType !== "string" ||
+            typeof sizeBytes !== "number" ||
+            !Number.isFinite(sizeBytes) ||
+            typeof extractedText !== "string"
+          ) {
+            return [];
+          }
+          const text = normalizeDocumentText(extractedText);
+          if (id.length === 0 || name.length === 0 || text.length === 0) {
+            return [];
+          }
+          return [{ id, name, mimeType, sizeBytes, extractedText: text }] satisfies ComposerDocument[];
+        })
+        .slice(0, MAX_COMPOSER_DOCUMENTS_PER_THREAD);
+      if (docs.length > 0) {
+        normalized[threadId] = docs;
+      }
+    }
+    return normalized;
+  } catch {
+    return {};
+  }
+}
+
+function persistComposerDocumentsToStorage(
+  draftsByThreadId: Record<string, ComposerDocument[]>,
+): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.setItem(COMPOSER_DOCUMENTS_STORAGE_KEY, JSON.stringify(draftsByThreadId));
+  } catch {
+    // Best-effort persistence.
+  }
+}
+
+function extractDocumentText(file: File): Promise<string> {
+  const lowerName = file.name.toLowerCase();
+  const isTextFile =
+    file.type === "text/plain" ||
+    file.type === "text/markdown" ||
+    lowerName.endsWith(".txt") ||
+    lowerName.endsWith(".md") ||
+    lowerName.endsWith(".markdown");
+  if (isTextFile) {
+    return file.text().then((text) => normalizeDocumentText(text));
+  }
+  if (lowerName.endsWith(".pdf") || file.type === "application/pdf") {
+    return Promise.resolve(
+      `[PDF] ${file.name}\n\nText extraction for PDF is not enabled in this build yet.`,
+    );
+  }
+  if (
+    lowerName.endsWith(".docx") ||
+    file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  ) {
+    return Promise.resolve(
+      `[DOCX] ${file.name}\n\nText extraction for DOCX is not enabled in this build yet.`,
+    );
+  }
+  return Promise.resolve(
+    `[FILE] ${file.name}\n\nUnsupported document type for text extraction in this build.`,
+  );
+}
+
+function buildDocumentContext(docs: readonly ComposerDocument[]): string {
+  if (docs.length === 0) return "";
+  let remaining = MAX_DOCUMENT_CONTEXT_CHARS;
+  const chunks: string[] = [];
+  for (const doc of docs) {
+    if (remaining <= 0) break;
+    const excerpt = doc.extractedText.slice(0, Math.min(MAX_DOCUMENT_CONTEXT_CHARS_PER_FILE, remaining));
+    if (excerpt.length === 0) continue;
+    chunks.push(`## ${doc.name}\n${excerpt}`);
+    remaining -= excerpt.length;
+  }
+  if (chunks.length === 0) return "";
+  return `\n\n[Attached document context]\n${chunks.join("\n\n")}`;
+}
+
+function isSupportedComposerDocument(file: File): boolean {
+  const lowerName = file.name.toLowerCase();
+  const supportedByType =
+    file.type === "text/plain" ||
+    file.type === "text/markdown" ||
+    file.type === "application/pdf" ||
+    file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  return (
+    supportedByType ||
+    lowerName.endsWith(".txt") ||
+    lowerName.endsWith(".md") ||
+    lowerName.endsWith(".markdown") ||
+    lowerName.endsWith(".pdf") ||
+    lowerName.endsWith(".docx")
+  );
+}
+
+function formatDocumentSize(sizeBytes: number): string {
+  if (sizeBytes < 1024) return `${sizeBytes} B`;
+  if (sizeBytes < 1024 * 1024) return `${Math.round(sizeBytes / 1024)} KB`;
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 function readLastInvokedScriptByProjectFromStorage(): Record<string, string> {
   const stored = localStorage.getItem(LAST_INVOKED_SCRIPT_BY_PROJECT_KEY);
@@ -587,9 +744,10 @@ const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
 
 interface ChatViewProps {
   threadId: ThreadId;
+  mode?: "default" | "lab";
 }
 
-export default function ChatView({ threadId }: ChatViewProps) {
+export default function ChatView({ threadId, mode = "default" }: ChatViewProps) {
   const threads = useStore((store) => store.threads);
   const projects = useStore((store) => store.projects);
   const markThreadVisited = useStore((store) => store.markThreadVisited);
@@ -608,6 +766,15 @@ export default function ChatView({ threadId }: ChatViewProps) {
   const composerDraft = useComposerThreadDraft(threadId);
   const prompt = composerDraft.prompt;
   const composerImages = composerDraft.images;
+  const [composerDocumentsByThreadId, setComposerDocumentsByThreadId] = useState<
+    Record<string, ComposerDocument[]>
+  >(() => readComposerDocumentsFromStorage());
+  const composerDocuments = useMemo(
+    () => composerDocumentsByThreadId[threadId] ?? [],
+    [composerDocumentsByThreadId, threadId],
+  );
+  const composerDocumentsRef = useRef<ComposerDocument[]>(composerDocuments);
+  const composerDocumentInputRef = useRef<HTMLInputElement | null>(null);
   const nonPersistedComposerImageIds = composerDraft.nonPersistedImageIds;
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
   const setComposerDraftProvider = useComposerDraftStore((store) => store.setProvider);
@@ -647,6 +814,12 @@ export default function ChatView({ threadId }: ChatViewProps) {
   const [isConnecting, _setIsConnecting] = useState(false);
   const [isRevertingCheckpoint, setIsRevertingCheckpoint] = useState(false);
   const [respondingRequestIds, setRespondingRequestIds] = useState<ApprovalRequestId[]>([]);
+  useEffect(() => {
+    composerDocumentsRef.current = composerDocuments;
+  }, [composerDocuments]);
+  useEffect(() => {
+    persistComposerDocumentsToStorage(composerDocumentsByThreadId);
+  }, [composerDocumentsByThreadId]);
   const [respondingUserInputRequestIds, setRespondingUserInputRequestIds] = useState<
     ApprovalRequestId[]
   >([]);
@@ -761,7 +934,9 @@ export default function ChatView({ threadId }: ChatViewProps) {
     () => parseDiffRouteSearch(rawSearch as Record<string, unknown>),
     [rawSearch],
   );
+  const isLabMode = mode === "lab";
   const diffOpen = diffSearch.diff === "1";
+  const canvasOpen = diffSearch.canvas === "1";
   const activeThreadId = activeThread?.id ?? null;
   const activeLatestTurn = activeThread?.latestTurn ?? null;
   const latestTurnSettled = isLatestTurnSettled(activeLatestTurn, activeThread?.session ?? null);
@@ -1318,6 +1493,23 @@ export default function ChatView({ threadId }: ChatViewProps) {
       },
     });
   }, [diffOpen, navigate, threadId]);
+  const onToggleCanvas = useCallback(() => {
+    void navigate({
+      to: "/$threadId",
+      params: { threadId },
+      replace: true,
+      search: (previous) => {
+        const rest = stripCanvasSearchParams(previous);
+        return canvasOpen ? rest : { ...rest, canvas: "1" };
+      },
+    });
+  }, [canvasOpen, navigate, threadId]);
+  const onOpenLab = useCallback(() => {
+    void navigate({
+      to: "/lab/$threadId",
+      params: { threadId },
+    });
+  }, [navigate, threadId]);
 
   const envLocked = Boolean(
     activeThread &&
@@ -2292,6 +2484,90 @@ export default function ChatView({ threadId }: ChatViewProps) {
     setThreadError(activeThreadId, error);
   };
 
+  const openComposerDocumentPicker = useCallback(() => {
+    composerDocumentInputRef.current?.click();
+  }, []);
+
+  const addComposerDocuments = useCallback(
+    async (files: File[]) => {
+      if (!activeThreadId || files.length === 0) return;
+      const existingDocs = composerDocumentsRef.current;
+      let nextDocumentCount = existingDocs.length;
+      const nextDocs: ComposerDocument[] = [];
+      let error: string | null = null;
+      for (const file of files) {
+        if (!isSupportedComposerDocument(file)) {
+          error = `Unsupported document type for '${file.name}'.`;
+          continue;
+        }
+        if (file.size > MAX_DOCUMENT_BYTES) {
+          error = `'${file.name}' exceeds the ${formatDocumentSize(MAX_DOCUMENT_BYTES)} document limit.`;
+          continue;
+        }
+        if (nextDocumentCount >= MAX_COMPOSER_DOCUMENTS_PER_THREAD) {
+          error = `You can pin up to ${MAX_COMPOSER_DOCUMENTS_PER_THREAD} documents per thread.`;
+          break;
+        }
+        const extractedText = await extractDocumentText(file);
+        if (extractedText.length === 0) {
+          error = `Could not extract readable text from '${file.name}'.`;
+          continue;
+        }
+        nextDocs.push({
+          id: crypto.randomUUID(),
+          name: file.name || "document",
+          mimeType: file.type || "application/octet-stream",
+          sizeBytes: file.size,
+          extractedText,
+        });
+        nextDocumentCount += 1;
+      }
+
+      if (nextDocs.length > 0) {
+        setComposerDocumentsByThreadId((existing) => ({
+          ...existing,
+          [activeThreadId]: [...(existing[activeThreadId] ?? []), ...nextDocs],
+        }));
+      }
+      setThreadError(activeThreadId, error);
+      focusComposer();
+    },
+    [activeThreadId, focusComposer, setThreadError],
+  );
+
+  const onComposerDocumentInputChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const files = event.currentTarget.files ? Array.from(event.currentTarget.files) : [];
+      event.currentTarget.value = "";
+      if (files.length === 0) return;
+      void addComposerDocuments(files);
+    },
+    [addComposerDocuments],
+  );
+
+  const removeComposerDocument = useCallback(
+    (documentId: string) => {
+      if (!activeThreadId) return;
+      setComposerDocumentsByThreadId((existing) => {
+        const threadDocs = existing[activeThreadId] ?? [];
+        const nextThreadDocs = threadDocs.filter((doc) => doc.id !== documentId);
+        if (nextThreadDocs.length === threadDocs.length) {
+          return existing;
+        }
+        if (nextThreadDocs.length === 0) {
+          const next = { ...existing };
+          delete next[activeThreadId];
+          return next;
+        }
+        return {
+          ...existing,
+          [activeThreadId]: nextThreadDocs,
+        };
+      });
+    },
+    [activeThreadId],
+  );
+
   const removeComposerImage = (imageId: string) => {
     removeComposerImageFromDraft(imageId);
   };
@@ -2350,7 +2626,14 @@ export default function ChatView({ threadId }: ChatViewProps) {
     dragDepthRef.current = 0;
     setIsDragOverComposer(false);
     const files = Array.from(event.dataTransfer.files);
-    addComposerImages(files);
+    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    const documentFiles = files.filter((file) => !file.type.startsWith("image/"));
+    if (imageFiles.length > 0) {
+      addComposerImages(imageFiles);
+    }
+    if (documentFiles.length > 0) {
+      void addComposerDocuments(documentFiles);
+    }
     focusComposer();
   };
 
@@ -2404,6 +2687,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       return;
     }
     const trimmed = prompt.trim();
+    const composerDocumentsSnapshot = [...composerDocumentsRef.current];
     if (showPlanFollowUpPrompt && activeProposedPlan) {
       const followUp = resolvePlanFollowUpSubmission({
         draftText: trimmed,
@@ -2421,7 +2705,9 @@ export default function ChatView({ threadId }: ChatViewProps) {
       return;
     }
     const standaloneSlashCommand =
-      composerImages.length === 0 ? parseStandaloneComposerSlashCommand(trimmed) : null;
+      composerImages.length === 0 && composerDocumentsSnapshot.length === 0
+        ? parseStandaloneComposerSlashCommand(trimmed)
+        : null;
     if (standaloneSlashCommand) {
       await handleInteractionModeChange(standaloneSlashCommand);
       promptRef.current = "";
@@ -2431,7 +2717,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       setComposerTrigger(null);
       return;
     }
-    if (!trimmed && composerImages.length === 0) return;
+    if (!trimmed && composerImages.length === 0 && composerDocumentsSnapshot.length === 0) return;
     if (!activeProject) return;
     const threadIdForSend = activeThread.id;
     const isFirstMessage = !isServerThread || activeThread.messages.length === 0;
@@ -2439,6 +2725,106 @@ export default function ChatView({ threadId }: ChatViewProps) {
       isFirstMessage && envMode === "worktree" && !activeThread.worktreePath
         ? activeThread.branch
         : null;
+    const uiCommandIntent = isElectron ? parseUiCommandIntent(trimmed) : null;
+    const browserNavigationTarget =
+      isElectron && uiCommandIntent?.type === "navigate-browser" ? uiCommandIntent.target : null;
+
+    if (uiCommandIntent) {
+      if (uiCommandIntent.type === "open-lab") {
+        onOpenLab();
+        promptRef.current = "";
+        clearComposerDraftContent(activeThread.id);
+        setComposerHighlightedItemId(null);
+        setComposerCursor(0);
+        setComposerTrigger(null);
+        return;
+      }
+
+      if (uiCommandIntent.type === "open-browser") {
+        if (isLabMode) {
+          void api.browser.attach(activeThread.id).catch(() => undefined);
+        } else {
+          onOpenLab();
+        }
+        promptRef.current = "";
+        clearComposerDraftContent(activeThread.id);
+        setComposerHighlightedItemId(null);
+        setComposerCursor(0);
+        setComposerTrigger(null);
+        return;
+      }
+
+      if (uiCommandIntent.type === "close-browser") {
+        if (isLabMode) {
+          void navigate({
+            to: "/$threadId",
+            params: { threadId: activeThread.id },
+          });
+        }
+        promptRef.current = "";
+        clearComposerDraftContent(activeThread.id);
+        setComposerHighlightedItemId(null);
+        setComposerCursor(0);
+        setComposerTrigger(null);
+        return;
+      }
+
+      if (uiCommandIntent.type === "open-canvas") {
+        if (!canvasOpen) {
+          onToggleCanvas();
+        }
+        promptRef.current = "";
+        clearComposerDraftContent(activeThread.id);
+        setComposerHighlightedItemId(null);
+        setComposerCursor(0);
+        setComposerTrigger(null);
+        return;
+      }
+
+      if (uiCommandIntent.type === "close-canvas") {
+        if (canvasOpen) {
+          onToggleCanvas();
+        }
+        promptRef.current = "";
+        clearComposerDraftContent(activeThread.id);
+        setComposerHighlightedItemId(null);
+        setComposerCursor(0);
+        setComposerTrigger(null);
+        return;
+      }
+
+      if (uiCommandIntent.type === "navigate-browser") {
+        await api.browser.navigate(activeThread.id, uiCommandIntent.target).catch(() => undefined);
+        if (!isLabMode) {
+          onOpenLab();
+        }
+        promptRef.current = "";
+        clearComposerDraftContent(activeThread.id);
+        setComposerHighlightedItemId(null);
+        setComposerCursor(0);
+        setComposerTrigger(null);
+        return;
+      }
+
+      if (uiCommandIntent.type === "browser-act") {
+        const result = await api.browser
+          .act(activeThread.id, uiCommandIntent.action)
+          .catch((error: unknown) => ({
+            ok: false,
+            detail: error instanceof Error ? error.message : "Unknown browser error.",
+          }));
+        setThreadError(activeThread.id, result.ok ? null : result.detail);
+        if (!isLabMode) {
+          onOpenLab();
+        }
+        promptRef.current = "";
+        clearComposerDraftContent(activeThread.id);
+        setComposerHighlightedItemId(null);
+        setComposerCursor(0);
+        setComposerTrigger(null);
+        return;
+      }
+    }
 
     // In worktree mode, require an explicit base branch so we don't silently
     // fall back to local execution when branch selection is missing.
@@ -2456,6 +2842,17 @@ export default function ChatView({ threadId }: ChatViewProps) {
     beginSendPhase(baseBranchForWorktree ? "preparing-worktree" : "sending-turn");
 
     const composerImagesSnapshot = [...composerImages];
+    const documentContext = buildDocumentContext(composerDocumentsSnapshot);
+    const turnText = (
+      trimmed ||
+      (composerImagesSnapshot.length > 0 ? IMAGE_ONLY_BOOTSTRAP_PROMPT : DOCUMENT_ONLY_BOOTSTRAP_PROMPT)
+    ).concat(documentContext);
+    const optimisticDocumentLabel =
+      trimmed.length > 0
+        ? trimmed
+        : composerDocumentsSnapshot.length > 0
+          ? `Attached documents: ${composerDocumentsSnapshot.map((doc) => doc.name).join(", ")}`
+          : "";
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
     const turnAttachmentsPromise = Promise.all(
@@ -2480,7 +2877,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       {
         id: messageIdForSend,
         role: "user",
-        text: trimmed,
+        text: optimisticDocumentLabel,
         ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
         createdAt: messageCreatedAt,
         streaming: false,
@@ -2502,6 +2899,10 @@ export default function ChatView({ threadId }: ChatViewProps) {
     let nextThreadBranch = activeThread.branch;
     let nextThreadWorktreePath = activeThread.worktreePath;
     await (async () => {
+      if (browserNavigationTarget) {
+        await api.browser.navigate(threadIdForSend, browserNavigationTarget).catch(() => undefined);
+      }
+
       // On first message: lock in branch + create worktree if needed.
       if (baseBranchForWorktree) {
         beginSendPhase("preparing-worktree");
@@ -2534,10 +2935,19 @@ export default function ChatView({ threadId }: ChatViewProps) {
           firstComposerImageName = firstComposerImage.name;
         }
       }
+      let firstComposerDocumentName: string | null = null;
+      if (composerDocumentsSnapshot.length > 0) {
+        const firstComposerDocument = composerDocumentsSnapshot[0];
+        if (firstComposerDocument) {
+          firstComposerDocumentName = firstComposerDocument.name;
+        }
+      }
       let titleSeed = trimmed;
       if (!titleSeed) {
         if (firstComposerImageName) {
           titleSeed = `Image: ${firstComposerImageName}`;
+        } else if (firstComposerDocumentName) {
+          titleSeed = `Doc: ${firstComposerDocumentName}`;
         } else {
           titleSeed = "New thread";
         }
@@ -2618,7 +3028,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
         message: {
           messageId: messageIdForSend,
           role: "user",
-          text: trimmed || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+          text: turnText,
           attachments: turnAttachments,
         },
         model: selectedModel || undefined,
@@ -3364,8 +3774,15 @@ export default function ChatView({ threadId }: ChatViewProps) {
           </header>
         )}
         {isElectron && (
-          <div className="drag-region flex h-[52px] shrink-0 items-center border-b border-border px-5">
+          <div className="drag-region flex min-h-[52px] shrink-0 items-center justify-between gap-3 border-b border-border px-5 py-2">
             <span className="text-xs text-muted-foreground/50">No active thread</span>
+            <WorkspaceSurfaceActions
+              codexStatus={activeProviderStatus}
+              className="no-drag-region shrink-0"
+              onToggleTerminal={toggleTerminalVisibility}
+              onOpenLab={onOpenLab}
+              onToggleCanvas={onToggleCanvas}
+            />
           </div>
         )}
         <div className="flex flex-1 items-center justify-center">
@@ -3378,12 +3795,12 @@ export default function ChatView({ threadId }: ChatViewProps) {
   }
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background">
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background">
       {/* Top bar */}
       <header
         className={cn(
           "border-b border-border px-3 sm:px-5",
-          isElectron ? "drag-region flex h-[52px] items-center" : "py-2 sm:py-3",
+          isElectron ? "drag-region flex min-h-[52px] items-center py-2" : "py-2 sm:py-3",
         )}
       >
         <ChatHeader
@@ -3401,12 +3818,19 @@ export default function ChatView({ threadId }: ChatViewProps) {
           diffToggleShortcutLabel={diffPanelShortcutLabel}
           gitCwd={gitCwd}
           diffOpen={diffOpen}
+          canvasOpen={canvasOpen}
+          isLabMode={isLabMode}
           onRunProjectScript={(script) => {
             void runProjectScript(script);
           }}
           onAddProjectScript={saveProjectScript}
           onUpdateProjectScript={updateProjectScript}
           onToggleDiff={onToggleDiff}
+          onToggleCanvas={onToggleCanvas}
+          onOpenLab={onOpenLab}
+          terminalOpen={terminalState.terminalOpen}
+          onToggleTerminal={toggleTerminalVisibility}
+          providerStatus={activeProviderStatus}
         />
       </header>
 
@@ -3463,6 +3887,15 @@ export default function ChatView({ threadId }: ChatViewProps) {
           className="mx-auto w-full min-w-0 max-w-3xl"
           data-chat-composer-form="true"
         >
+          <input
+            ref={composerDocumentInputRef}
+            type="file"
+            accept={DOCUMENT_ACCEPT_TYPES}
+            multiple
+            className="sr-only"
+            onChange={onComposerDocumentInputChange}
+            aria-label="Attach documents"
+          />
           <div
             className={`group rounded-[20px] border bg-card transition-colors duration-200 focus-within:border-ring/45 ${
               isDragOverComposer ? "border-primary/70 bg-accent/30" : "border-border"
@@ -3583,6 +4016,33 @@ export default function ChatView({ threadId }: ChatViewProps) {
                   ))}
                 </div>
               )}
+              {!isComposerApprovalState &&
+              pendingUserInputs.length === 0 &&
+              composerDocuments.length > 0 ? (
+                <div className="mb-3 flex flex-wrap gap-2">
+                  {composerDocuments.map((document) => (
+                    <div
+                      key={document.id}
+                      className="inline-flex max-w-full items-center gap-2 rounded-full border border-border/80 bg-muted/30 px-2.5 py-1 text-xs"
+                    >
+                      <FileIcon className="size-3.5 text-muted-foreground/80" />
+                      <span className="truncate font-medium">{document.name}</span>
+                      <span className="text-muted-foreground/70">
+                        {formatDocumentSize(document.sizeBytes)}
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="icon-xs"
+                        className="rounded-full"
+                        onClick={() => removeComposerDocument(document.id)}
+                        aria-label={`Remove ${document.name}`}
+                      >
+                        <XIcon />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
               <ComposerPromptEditor
                 ref={composerEditorRef}
                 value={
@@ -3601,10 +4061,10 @@ export default function ChatView({ threadId }: ChatViewProps) {
                     ? (activePendingApproval?.detail ?? "Resolve this approval request to continue")
                     : activePendingProgress
                     ? "Type your own answer, or leave this blank to use the selected option"
-                    : showPlanFollowUpPrompt && activeProposedPlan
+                      : showPlanFollowUpPrompt && activeProposedPlan
                       ? "Add feedback to refine the plan, or leave this blank to implement it"
                       : phase === "disconnected"
-                        ? "Ask for follow-up changes or attach images"
+                        ? "Ask for follow-up changes or attach files"
                         : "Ask anything, @tag files/folders, or use /model"
                 }
                 disabled={isConnecting || isComposerApprovalState}
@@ -3692,6 +4152,19 @@ export default function ChatView({ threadId }: ChatViewProps) {
                     <span className="sr-only sm:not-sr-only">
                       {runtimeMode === "full-access" ? "Full access" : "Supervised"}
                     </span>
+                  </Button>
+
+                  <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
+                  <Button
+                    variant="ghost"
+                    className="shrink-0 whitespace-nowrap px-2 text-muted-foreground/70 hover:text-foreground/80 sm:px-3"
+                    size="sm"
+                    type="button"
+                    onClick={openComposerDocumentPicker}
+                    title="Attach documents (.txt, .md, .pdf, .docx)"
+                  >
+                    <PaperclipIcon />
+                    <span className="sr-only sm:not-sr-only">Attach</span>
                   </Button>
                 </div>
 
@@ -3801,7 +4274,9 @@ export default function ChatView({ threadId }: ChatViewProps) {
                         disabled={
                           isSendBusy ||
                           isConnecting ||
-                          (!prompt.trim() && composerImages.length === 0)
+                          (!prompt.trim() &&
+                            composerImages.length === 0 &&
+                            composerDocuments.length === 0)
                         }
                         aria-label={
                           isConnecting
@@ -3868,6 +4343,22 @@ export default function ChatView({ threadId }: ChatViewProps) {
         />
       )}
 
+      {!terminalState.terminalOpen && activeProject ? (
+        <div className="w-full px-3 pb-1 sm:px-5 sm:pb-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="ms-auto flex h-7 rounded-full border border-border/70 bg-muted/20 px-3 text-muted-foreground/80 hover:text-foreground"
+            onClick={toggleTerminalVisibility}
+            title="Reopen terminal"
+          >
+            <MinusIcon className="size-3.5" />
+            <span>Terminal</span>
+          </Button>
+        </div>
+      ) : null}
+
       {(() => {
         if (!terminalState.terminalOpen || !activeProject) {
           return null;
@@ -3891,6 +4382,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
             closeShortcutLabel={closeTerminalShortcutLabel ?? undefined}
             onActiveTerminalChange={activateTerminal}
             onCloseTerminal={closeTerminal}
+            onToggleTerminal={toggleTerminalVisibility}
             onHeightChange={setTerminalHeight}
           />
         );
@@ -3980,10 +4472,17 @@ interface ChatHeaderProps {
   diffToggleShortcutLabel: string | null;
   gitCwd: string | null;
   diffOpen: boolean;
+  canvasOpen: boolean;
+  isLabMode: boolean;
+  terminalOpen: boolean;
+  providerStatus: ServerProviderStatus | null;
   onRunProjectScript: (script: ProjectScript) => void;
   onAddProjectScript: (input: NewProjectScriptInput) => Promise<void>;
   onUpdateProjectScript: (scriptId: string, input: NewProjectScriptInput) => Promise<void>;
   onToggleDiff: () => void;
+  onToggleCanvas: () => void;
+  onOpenLab: () => void;
+  onToggleTerminal: () => void;
 }
 
 const ChatHeader = memo(function ChatHeader({
@@ -3999,33 +4498,57 @@ const ChatHeader = memo(function ChatHeader({
   diffToggleShortcutLabel,
   gitCwd,
   diffOpen,
+  canvasOpen,
+  isLabMode,
+  terminalOpen,
+  providerStatus,
   onRunProjectScript,
   onAddProjectScript,
   onUpdateProjectScript,
   onToggleDiff,
+  onToggleCanvas,
+  onOpenLab,
+  onToggleTerminal,
 }: ChatHeaderProps) {
+  const hasProjectControls =
+    Boolean(activeProjectScripts) || Boolean(activeProjectName) || Boolean(!isLabMode);
+
   return (
-    <div className="flex min-w-0 flex-1 items-center gap-2">
-      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden sm:gap-3">
-        <SidebarTrigger className="size-7 shrink-0 md:hidden" />
-        <h2
-          className="min-w-0 shrink truncate text-sm font-medium text-foreground"
-          title={activeThreadTitle}
-        >
-          {activeThreadTitle}
-        </h2>
-        {activeProjectName && (
-          <Badge variant="outline" className="max-w-28 shrink-0 truncate">
-            {activeProjectName}
-          </Badge>
-        )}
-        {activeProjectName && !isGitRepo && (
-          <Badge variant="outline" className="shrink-0 text-[10px] text-amber-700">
-            No Git
-          </Badge>
-        )}
+    <div className="flex min-w-0 flex-1 flex-col gap-2">
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2 overflow-hidden sm:gap-3">
+          <SidebarTrigger className="size-7 shrink-0 md:hidden" />
+          <h2
+            className="min-w-0 shrink truncate text-sm font-medium text-foreground"
+            title={activeThreadTitle}
+          >
+            {activeThreadTitle}
+          </h2>
+          {activeProjectName && (
+            <Badge variant="outline" className="max-w-28 shrink-0 truncate">
+              {activeProjectName}
+            </Badge>
+          )}
+          {activeProjectName && !isGitRepo && (
+            <Badge variant="outline" className="shrink-0 text-[10px] text-amber-700">
+              No Git
+            </Badge>
+          )}
+        </div>
+        <WorkspaceSurfaceActions
+          codexStatus={providerStatus}
+          terminalOpen={terminalOpen}
+          canvasOpen={canvasOpen}
+          showLabButton={!isLabMode}
+          showCanvasButton={!isLabMode && isElectron}
+          className="no-drag-region shrink-0 flex-none justify-start"
+          onToggleTerminal={onToggleTerminal}
+          onOpenLab={!isLabMode ? onOpenLab : undefined}
+          onToggleCanvas={!isLabMode && isElectron ? onToggleCanvas : undefined}
+        />
       </div>
-      <div className="@container/header-actions flex min-w-0 flex-1 items-center justify-end gap-2 @sm/header-actions:gap-3">
+      {hasProjectControls ? (
+      <div className="@container/header-actions flex min-w-0 flex-wrap items-center gap-2 @sm/header-actions:gap-3">
         {activeProjectScripts && (
           <ProjectScriptsControl
             scripts={activeProjectScripts}
@@ -4065,10 +4588,11 @@ const ChatHeader = memo(function ChatHeader({
               ? "Diff panel is unavailable because this project is not a git repository."
               : diffToggleShortcutLabel
                 ? `Toggle diff panel (${diffToggleShortcutLabel})`
-                : "Toggle diff panel"}
+              : "Toggle diff panel"}
           </TooltipPopup>
         </Tooltip>
       </div>
+      ) : null}
     </div>
   );
 });
@@ -5238,7 +5762,7 @@ const MessagesTimeline = memo(function MessagesTimeline({
 
   if (!hasMessages && !isWorking) {
     return (
-      <div className="flex h-full items-center justify-center">
+      <div className="flex h-full items-start justify-center pt-8 sm:pt-10">
         <p className="text-sm text-muted-foreground/30">
           Send a message to start the conversation.
         </p>
@@ -5285,28 +5809,28 @@ function isAvailableProviderOption(option: (typeof PROVIDER_OPTIONS)[number]): o
   label: string;
   available: true;
 } {
-  return option.available && option.value !== "claudeCode";
+  return option.available;
 }
 
 const AVAILABLE_PROVIDER_OPTIONS = PROVIDER_OPTIONS.filter(isAvailableProviderOption);
 const UNAVAILABLE_PROVIDER_OPTIONS = PROVIDER_OPTIONS.filter((option) => !option.available);
-const COMING_SOON_PROVIDER_OPTIONS = [
-  { id: "opencode", label: "OpenCode", icon: OpenCodeIcon },
-  { id: "gemini", label: "Gemini", icon: Gemini },
-] as const;
 
 function getCustomModelOptionsByProvider(settings: {
   customCodexModels: readonly string[];
 }): Record<ProviderKind, ReadonlyArray<{ slug: string; name: string }>> {
   return {
     codex: getAppModelOptions("codex", settings.customCodexModels),
+    "claude-code": getAppModelOptions("claude-code", []),
+    "gemini-cli": getAppModelOptions("gemini-cli", []),
+    "github-copilot-cli": getAppModelOptions("github-copilot-cli", []),
   };
 }
 
 const PROVIDER_ICON_BY_PROVIDER: Record<ProviderPickerKind, Icon> = {
   codex: OpenAI,
-  claudeCode: ClaudeAI,
-  cursor: CursorIcon,
+  "claude-code": ClaudeAI,
+  "gemini-cli": Gemini,
+  "github-copilot-cli": CursorIcon,
 };
 
 function resolveModelForProviderPicker(
@@ -5443,26 +5967,7 @@ const ProviderModelPicker = memo(function ProviderModelPicker(props: {
           const OptionIcon = PROVIDER_ICON_BY_PROVIDER[option.value];
           return (
             <MenuItem key={option.value} disabled>
-              <OptionIcon
-                aria-hidden="true"
-                className={cn(
-                  "size-4 shrink-0 opacity-80",
-                  option.value === "claudeCode" ? "" : "text-muted-foreground/85",
-                )}
-              />
-              <span>{option.label}</span>
-              <span className="ms-auto text-[11px] text-muted-foreground/80 uppercase tracking-[0.08em]">
-                Coming soon
-              </span>
-            </MenuItem>
-          );
-        })}
-        {UNAVAILABLE_PROVIDER_OPTIONS.length === 0 && <MenuDivider />}
-        {COMING_SOON_PROVIDER_OPTIONS.map((option) => {
-          const OptionIcon = option.icon;
-          return (
-            <MenuItem key={option.id} disabled>
-              <OptionIcon aria-hidden="true" className="size-4 shrink-0 opacity-80" />
+              <OptionIcon aria-hidden="true" className="size-4 shrink-0 text-muted-foreground/85 opacity-80" />
               <span>{option.label}</span>
               <span className="ms-auto text-[11px] text-muted-foreground/80 uppercase tracking-[0.08em]">
                 Coming soon
@@ -5673,3 +6178,7 @@ const OpenInPicker = memo(function OpenInPicker({
     </Group>
   );
 });
+
+
+
+

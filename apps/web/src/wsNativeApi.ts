@@ -160,6 +160,10 @@ export function createWsNativeApi(): NativeApi {
         window.open(url, "_blank", "noopener,noreferrer");
       },
     },
+    github: {
+      startDeviceFlow: () => transport.request(WS_METHODS.githubStartDeviceFlow, {}),
+      pollDeviceFlow: (input) => transport.request(WS_METHODS.githubPollDeviceFlow, input),
+    },
     git: {
       pull: (input) => transport.request(WS_METHODS.gitPull, input),
       status: (input) => transport.request(WS_METHODS.gitStatus, input),
@@ -185,6 +189,12 @@ export function createWsNativeApi(): NativeApi {
     server: {
       getConfig: () => transport.request(WS_METHODS.serverGetConfig),
       upsertKeybinding: (input) => transport.request(WS_METHODS.serverUpsertKeybinding, input),
+      detectCliInstallations: () =>
+        transport.request(WS_METHODS.serverDetectCliInstallations, {}),
+    },
+    canvas: {
+      getState: (input) => transport.request(WS_METHODS.canvasGetState, input),
+      upsertState: (input) => transport.request(WS_METHODS.canvasUpsertState, input),
     },
     orchestration: {
       getSnapshot: () => transport.request(ORCHESTRATION_WS_METHODS.getSnapshot),
@@ -200,6 +210,80 @@ export function createWsNativeApi(): NativeApi {
           const payload = decodeAndWarnOnFailure(OrchestrationEvent, data);
           if (payload) callback(payload);
         }),
+    },
+    browser: {
+      attach: async (threadId) => {
+        if (!window.desktopBridge) {
+          throw new Error("Browser canvas is only available in the desktop app.");
+        }
+        return window.desktopBridge.browserAttach(threadId);
+      },
+      setVisible: async (threadId, visible, bounds) => {
+        if (!window.desktopBridge) {
+          throw new Error("Browser canvas is only available in the desktop app.");
+        }
+        return window.desktopBridge.browserSetVisible(threadId, visible, bounds);
+      },
+      navigate: async (threadId, url) => {
+        if (!window.desktopBridge) {
+          throw new Error("Browser canvas is only available in the desktop app.");
+        }
+        return window.desktopBridge.browserNavigate(threadId, url);
+      },
+      goBack: async (threadId) => {
+        if (!window.desktopBridge) {
+          throw new Error("Browser canvas is only available in the desktop app.");
+        }
+        return window.desktopBridge.browserGoBack(threadId);
+      },
+      goForward: async (threadId) => {
+        if (!window.desktopBridge) {
+          throw new Error("Browser canvas is only available in the desktop app.");
+        }
+        return window.desktopBridge.browserGoForward(threadId);
+      },
+      reload: async (threadId) => {
+        if (!window.desktopBridge) {
+          throw new Error("Browser canvas is only available in the desktop app.");
+        }
+        return window.desktopBridge.browserReload(threadId);
+      },
+      getState: async (threadId) => {
+        if (!window.desktopBridge) {
+          throw new Error("Browser canvas is only available in the desktop app.");
+        }
+        return window.desktopBridge.browserGetState(threadId);
+      },
+      observe: async (threadId, target) => {
+        if (!window.desktopBridge) {
+          throw new Error("Browser canvas is only available in the desktop app.");
+        }
+        return window.desktopBridge.browserObserve(threadId, target);
+      },
+      act: async (threadId, action) => {
+        if (!window.desktopBridge) {
+          throw new Error("Browser canvas is only available in the desktop app.");
+        }
+        return window.desktopBridge.browserAct(threadId, action);
+      },
+      extract: async (threadId, query) => {
+        if (!window.desktopBridge) {
+          throw new Error("Browser canvas is only available in the desktop app.");
+        }
+        return window.desktopBridge.browserExtract(threadId, query);
+      },
+      wait: async (threadId, durationMs) => {
+        if (!window.desktopBridge) {
+          throw new Error("Browser canvas is only available in the desktop app.");
+        }
+        return window.desktopBridge.browserWait(threadId, durationMs);
+      },
+      onState: (callback) => {
+        if (!window.desktopBridge) {
+          return () => {};
+        }
+        return window.desktopBridge.onBrowserState(callback);
+      },
     },
   };
 

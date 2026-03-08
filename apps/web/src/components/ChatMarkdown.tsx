@@ -20,6 +20,14 @@ import React, {
 import type { Components } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import * as prettier from "prettier/standalone";
+import * as prettierPluginBabel from "prettier/plugins/babel";
+import * as prettierPluginEstree from "prettier/plugins/estree";
+import * as prettierPluginHtml from "prettier/plugins/html";
+import * as prettierPluginMarkdown from "prettier/plugins/markdown";
+import * as prettierPluginPostcss from "prettier/plugins/postcss";
+import * as prettierPluginTypescript from "prettier/plugins/typescript";
+import * as prettierPluginYaml from "prettier/plugins/yaml";
 import { resolveDiffThemeName, type DiffThemeName } from "../lib/diffRendering";
 import { fnv1a32 } from "../lib/diffRendering";
 import { LRUCache } from "../lib/lruCache";
@@ -58,11 +66,44 @@ interface ChatMarkdownProps {
 const CODE_FENCE_LANGUAGE_REGEX = /(?:^|\s)language-([^\s]+)/;
 const MAX_HIGHLIGHT_CACHE_ENTRIES = 500;
 const MAX_HIGHLIGHT_CACHE_MEMORY_BYTES = 50 * 1024 * 1024;
+const MAX_PRETTIER_FORMAT_BYTES = 50_000;
 const highlightedCodeCache = new LRUCache<string>(
   MAX_HIGHLIGHT_CACHE_ENTRIES,
   MAX_HIGHLIGHT_CACHE_MEMORY_BYTES,
 );
 const highlighterPromiseCache = new Map<string, Promise<DiffsHighlighter>>();
+const formattedCodePromiseCache = new Map<string, Promise<string>>();
+
+const PRETTIER_PARSER_BY_LANGUAGE: Record<string, string> = {
+  css: "css",
+  html: "html",
+  javascript: "babel",
+  js: "babel",
+  json: "json",
+  jsonc: "json",
+  jsx: "babel",
+  less: "less",
+  markdown: "markdown",
+  md: "markdown",
+  scss: "scss",
+  ts: "typescript",
+  tsx: "typescript",
+  typescript: "typescript",
+  xml: "html",
+  yaml: "yaml",
+  yml: "yaml",
+};
+const PRETTIER_PLUGINS_BY_PARSER: Record<string, object[]> = {
+  babel: [prettierPluginBabel, prettierPluginEstree],
+  css: [prettierPluginPostcss],
+  html: [prettierPluginHtml],
+  json: [prettierPluginBabel, prettierPluginEstree],
+  less: [prettierPluginPostcss],
+  markdown: [prettierPluginMarkdown],
+  scss: [prettierPluginPostcss],
+  typescript: [prettierPluginTypescript, prettierPluginEstree],
+  yaml: [prettierPluginYaml],
+};
 
 function extractFenceLanguage(className: string | undefined): string {
   const match = className?.match(CODE_FENCE_LANGUAGE_REGEX);
@@ -108,6 +149,10 @@ function createHighlightCacheKey(code: string, language: string, themeName: Diff
   return `${fnv1a32(code).toString(36)}:${code.length}:${language}:${themeName}`;
 }
 
+function createFormatCacheKey(code: string, language: string): string {
+  return `${fnv1a32(code).toString(36)}:${code.length}:${language}`;
+}
+
 function estimateHighlightedSize(html: string, code: string): number {
   return Math.max(html.length * 2, code.length * 3);
 }
@@ -133,7 +178,50 @@ function getHighlighterPromise(language: string): Promise<DiffsHighlighter> {
   return promise;
 }
 
-function MarkdownCodeBlock({ code, children }: { code: string; children: ReactNode }) {
+async function formatCodeWithPrettier(code: string, language: string): Promise<string> {
+  if (code.length === 0 || code.length > MAX_PRETTIER_FORMAT_BYTES) {
+    return code;
+  }
+
+  const parser = PRETTIER_PARSER_BY_LANGUAGE[language.toLowerCase()];
+  if (!parser) {
+    return code;
+  }
+  const plugins = PRETTIER_PLUGINS_BY_PARSER[parser] ?? [];
+
+  if (plugins.length === 0) {
+    return code;
+  }
+
+  try {
+    return await prettier.format(code, {
+      parser,
+      plugins,
+      tabWidth: 2,
+      useTabs: false,
+    });
+  } catch {
+    return code;
+  }
+}
+
+function getFormattedCodePromise(code: string, language: string, isStreaming: boolean): Promise<string> {
+  if (isStreaming) {
+    return Promise.resolve(code);
+  }
+
+  const cacheKey = createFormatCacheKey(code, language);
+  const cached = formattedCodePromiseCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const promise = formatCodeWithPrettier(code, language).catch(() => code);
+  formattedCodePromiseCache.set(cacheKey, promise);
+  return promise;
+}
+
+function MarkdownCodeBlockChrome({ code, children }: { code: string; children: ReactNode }) {
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleCopy = useCallback(() => {
@@ -195,40 +283,59 @@ function SuspenseShikiCodeBlock({
   isStreaming,
 }: SuspenseShikiCodeBlockProps) {
   const language = extractFenceLanguage(className);
-  const cacheKey = createHighlightCacheKey(code, language, themeName);
+  const formattedCode = use(getFormattedCodePromise(code, language, isStreaming));
+  const cacheKey = createHighlightCacheKey(formattedCode, language, themeName);
   const cachedHighlightedHtml = !isStreaming ? highlightedCodeCache.get(cacheKey) : null;
 
   if (cachedHighlightedHtml != null) {
     return (
-      <div
-        className="chat-markdown-shiki"
-        dangerouslySetInnerHTML={{ __html: cachedHighlightedHtml }}
-      />
+      <MarkdownCodeBlockChrome code={formattedCode}>
+        <div
+          className="chat-markdown-shiki"
+          dangerouslySetInnerHTML={{ __html: cachedHighlightedHtml }}
+        />
+      </MarkdownCodeBlockChrome>
     );
   }
 
   const highlighter = use(getHighlighterPromise(language));
   const highlightedHtml = useMemo(() => {
     try {
-      return highlighter.codeToHtml(code, { lang: language, theme: themeName });
+      return highlighter.codeToHtml(formattedCode, { lang: language, theme: themeName });
     } catch {
       // If highlighting fails for this language, render as plain text
-      return highlighter.codeToHtml(code, { lang: "text", theme: themeName });
+      return highlighter.codeToHtml(formattedCode, { lang: "text", theme: themeName });
     }
-  }, [code, highlighter, language, themeName]);
+  }, [formattedCode, highlighter, language, themeName]);
 
   useEffect(() => {
     if (!isStreaming) {
       highlightedCodeCache.set(
         cacheKey,
         highlightedHtml,
-        estimateHighlightedSize(highlightedHtml, code),
+        estimateHighlightedSize(highlightedHtml, formattedCode),
       );
     }
-  }, [cacheKey, code, highlightedHtml, isStreaming]);
+  }, [cacheKey, formattedCode, highlightedHtml, isStreaming]);
 
   return (
-    <div className="chat-markdown-shiki" dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
+    <MarkdownCodeBlockChrome code={formattedCode}>
+      <div className="chat-markdown-shiki" dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
+    </MarkdownCodeBlockChrome>
+  );
+}
+
+function MarkdownCodeBlockFallback({
+  code,
+  children,
+}: {
+  code: string;
+  children: ReactNode;
+}) {
+  return (
+    <MarkdownCodeBlockChrome code={code}>
+      {children}
+    </MarkdownCodeBlockChrome>
   );
 }
 
@@ -267,18 +374,22 @@ function ChatMarkdown({ text, cwd, isStreaming = false }: ChatMarkdownProps) {
         }
 
         return (
-          <MarkdownCodeBlock code={codeBlock.code}>
-            <CodeHighlightErrorBoundary fallback={<pre {...props}>{children}</pre>}>
-              <Suspense fallback={<pre {...props}>{children}</pre>}>
+          <CodeHighlightErrorBoundary fallback={<pre {...props}>{children}</pre>}>
+            <Suspense
+              fallback={
+                <MarkdownCodeBlockFallback code={codeBlock.code}>
+                  <pre {...props}>{children}</pre>
+                </MarkdownCodeBlockFallback>
+              }
+            >
                 <SuspenseShikiCodeBlock
                   className={codeBlock.className}
                   code={codeBlock.code}
                   themeName={diffThemeName}
                   isStreaming={isStreaming}
                 />
-              </Suspense>
-            </CodeHighlightErrorBoundary>
-          </MarkdownCodeBlock>
+            </Suspense>
+          </CodeHighlightErrorBoundary>
         );
       },
     }),

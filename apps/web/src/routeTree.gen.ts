@@ -9,23 +9,47 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as LabRouteImport } from './routes/lab'
 import { Route as ChatRouteImport } from './routes/_chat'
+import { Route as LabIndexRouteImport } from './routes/lab.index'
 import { Route as ChatIndexRouteImport } from './routes/_chat.index'
+import { Route as LabThreadIdRouteImport } from './routes/lab.$threadId'
 import { Route as ChatSettingsRouteImport } from './routes/_chat.settings'
+import { Route as ChatDocsRouteImport } from './routes/_chat.docs'
 import { Route as ChatThreadIdRouteImport } from './routes/_chat.$threadId'
 
+const LabRoute = LabRouteImport.update({
+  id: '/lab',
+  path: '/lab',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ChatRoute = ChatRouteImport.update({
   id: '/_chat',
   getParentRoute: () => rootRouteImport,
+} as any)
+const LabIndexRoute = LabIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => LabRoute,
 } as any)
 const ChatIndexRoute = ChatIndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => ChatRoute,
 } as any)
+const LabThreadIdRoute = LabThreadIdRouteImport.update({
+  id: '/$threadId',
+  path: '/$threadId',
+  getParentRoute: () => LabRoute,
+} as any)
 const ChatSettingsRoute = ChatSettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatDocsRoute = ChatDocsRouteImport.update({
+  id: '/docs',
+  path: '/docs',
   getParentRoute: () => ChatRoute,
 } as any)
 const ChatThreadIdRoute = ChatThreadIdRouteImport.update({
@@ -36,41 +60,83 @@ const ChatThreadIdRoute = ChatThreadIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof ChatIndexRoute
+  '/lab': typeof LabRouteWithChildren
   '/$threadId': typeof ChatThreadIdRoute
+  '/docs': typeof ChatDocsRoute
   '/settings': typeof ChatSettingsRoute
+  '/lab/$threadId': typeof LabThreadIdRoute
+  '/lab/': typeof LabIndexRoute
 }
 export interface FileRoutesByTo {
   '/$threadId': typeof ChatThreadIdRoute
+  '/docs': typeof ChatDocsRoute
   '/settings': typeof ChatSettingsRoute
+  '/lab/$threadId': typeof LabThreadIdRoute
   '/': typeof ChatIndexRoute
+  '/lab': typeof LabIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_chat': typeof ChatRouteWithChildren
+  '/lab': typeof LabRouteWithChildren
   '/_chat/$threadId': typeof ChatThreadIdRoute
+  '/_chat/docs': typeof ChatDocsRoute
   '/_chat/settings': typeof ChatSettingsRoute
+  '/lab/$threadId': typeof LabThreadIdRoute
   '/_chat/': typeof ChatIndexRoute
+  '/lab/': typeof LabIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/$threadId' | '/settings'
+  fullPaths:
+    | '/'
+    | '/lab'
+    | '/$threadId'
+    | '/docs'
+    | '/settings'
+    | '/lab/$threadId'
+    | '/lab/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/$threadId' | '/settings' | '/'
-  id: '__root__' | '/_chat' | '/_chat/$threadId' | '/_chat/settings' | '/_chat/'
+  to: '/$threadId' | '/docs' | '/settings' | '/lab/$threadId' | '/' | '/lab'
+  id:
+    | '__root__'
+    | '/_chat'
+    | '/lab'
+    | '/_chat/$threadId'
+    | '/_chat/docs'
+    | '/_chat/settings'
+    | '/lab/$threadId'
+    | '/_chat/'
+    | '/lab/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   ChatRoute: typeof ChatRouteWithChildren
+  LabRoute: typeof LabRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/lab': {
+      id: '/lab'
+      path: '/lab'
+      fullPath: '/lab'
+      preLoaderRoute: typeof LabRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/_chat': {
       id: '/_chat'
       path: ''
       fullPath: '/'
       preLoaderRoute: typeof ChatRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/lab/': {
+      id: '/lab/'
+      path: '/'
+      fullPath: '/lab/'
+      preLoaderRoute: typeof LabIndexRouteImport
+      parentRoute: typeof LabRoute
     }
     '/_chat/': {
       id: '/_chat/'
@@ -79,11 +145,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatIndexRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/lab/$threadId': {
+      id: '/lab/$threadId'
+      path: '/$threadId'
+      fullPath: '/lab/$threadId'
+      preLoaderRoute: typeof LabThreadIdRouteImport
+      parentRoute: typeof LabRoute
+    }
     '/_chat/settings': {
       id: '/_chat/settings'
       path: '/settings'
       fullPath: '/settings'
       preLoaderRoute: typeof ChatSettingsRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/_chat/docs': {
+      id: '/_chat/docs'
+      path: '/docs'
+      fullPath: '/docs'
+      preLoaderRoute: typeof ChatDocsRouteImport
       parentRoute: typeof ChatRoute
     }
     '/_chat/$threadId': {
@@ -98,20 +178,35 @@ declare module '@tanstack/react-router' {
 
 interface ChatRouteChildren {
   ChatThreadIdRoute: typeof ChatThreadIdRoute
+  ChatDocsRoute: typeof ChatDocsRoute
   ChatSettingsRoute: typeof ChatSettingsRoute
   ChatIndexRoute: typeof ChatIndexRoute
 }
 
 const ChatRouteChildren: ChatRouteChildren = {
   ChatThreadIdRoute: ChatThreadIdRoute,
+  ChatDocsRoute: ChatDocsRoute,
   ChatSettingsRoute: ChatSettingsRoute,
   ChatIndexRoute: ChatIndexRoute,
 }
 
 const ChatRouteWithChildren = ChatRoute._addFileChildren(ChatRouteChildren)
 
+interface LabRouteChildren {
+  LabThreadIdRoute: typeof LabThreadIdRoute
+  LabIndexRoute: typeof LabIndexRoute
+}
+
+const LabRouteChildren: LabRouteChildren = {
+  LabThreadIdRoute: LabThreadIdRoute,
+  LabIndexRoute: LabIndexRoute,
+}
+
+const LabRouteWithChildren = LabRoute._addFileChildren(LabRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
   ChatRoute: ChatRouteWithChildren,
+  LabRoute: LabRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

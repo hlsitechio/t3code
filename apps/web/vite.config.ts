@@ -1,3 +1,4 @@
+import path from "node:path";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
@@ -26,6 +27,16 @@ export default defineConfig({
     enableNativePlugin: true,
   },
   resolve: {
+    alias: {
+      "prettier/standalone": path.resolve("node_modules/prettier/standalone.mjs"),
+      "prettier/plugins/babel": path.resolve("node_modules/prettier/plugins/babel.mjs"),
+      "prettier/plugins/estree": path.resolve("node_modules/prettier/plugins/estree.mjs"),
+      "prettier/plugins/html": path.resolve("node_modules/prettier/plugins/html.mjs"),
+      "prettier/plugins/markdown": path.resolve("node_modules/prettier/plugins/markdown.mjs"),
+      "prettier/plugins/postcss": path.resolve("node_modules/prettier/plugins/postcss.mjs"),
+      "prettier/plugins/typescript": path.resolve("node_modules/prettier/plugins/typescript.mjs"),
+      "prettier/plugins/yaml": path.resolve("node_modules/prettier/plugins/yaml.mjs"),
+    },
     tsconfigPaths: true,
   },
   server: {
@@ -42,5 +53,35 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    chunkSizeWarningLimit: 700,
+    rolldownOptions: {
+      output: {
+        codeSplitting: true,
+        manualChunks(id) {
+          if (!id.includes("node_modules")) {
+            return undefined;
+          }
+          if (id.includes("@xterm/")) {
+            return "vendor-xterm";
+          }
+          if (id.includes("@tanstack/")) {
+            return "vendor-tanstack";
+          }
+          if (id.includes("@lexical/") || id.includes("lexical")) {
+            return "vendor-lexical";
+          }
+          if (id.includes("prettier/")) {
+            return "vendor-prettier";
+          }
+          if (id.includes("@pierre/diffs")) {
+            return "vendor-diff";
+          }
+          if (id.includes("react")) {
+            return "vendor-react";
+          }
+          return "vendor-misc";
+        },
+      },
+    },
   },
 });

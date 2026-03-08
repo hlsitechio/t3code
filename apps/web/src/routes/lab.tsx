@@ -1,5 +1,4 @@
-import { Outlet, createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { Outlet, createFileRoute } from "@tanstack/react-router";
 
 import { DiffWorkerPoolProvider } from "../components/DiffWorkerPoolProvider";
 import ThreadSidebar from "../components/Sidebar";
@@ -9,25 +8,7 @@ const APP_SIDEBAR_WIDTH_STORAGE_KEY = "app_sidebar_width";
 const APP_SIDEBAR_MIN_WIDTH = 14 * 16;
 const APP_SIDEBAR_MAX_WIDTH = 28 * 16;
 
-function ChatRouteLayout() {
-  const navigate = useNavigate();
-
-  useEffect(() => {
-    const onMenuAction = window.desktopBridge?.onMenuAction;
-    if (typeof onMenuAction !== "function") {
-      return;
-    }
-
-    const unsubscribe = onMenuAction((action) => {
-      if (action !== "open-settings") return;
-      void navigate({ to: "/settings" });
-    });
-
-    return () => {
-      unsubscribe?.();
-    };
-  }, [navigate]);
-
+function LabRouteLayout() {
   return (
     <SidebarProvider defaultOpen>
       <Sidebar
@@ -50,6 +31,6 @@ function ChatRouteLayout() {
   );
 }
 
-export const Route = createFileRoute("/_chat")({
-  component: ChatRouteLayout,
+export const Route = createFileRoute("/lab")({
+  component: LabRouteLayout,
 });
