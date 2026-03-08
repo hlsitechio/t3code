@@ -241,6 +241,11 @@ export function createDevRunnerEnv({
       delete output.T3CODE_LOG_WS_EVENTS;
     }
 
+    if (mode === "dev:desktop") {
+      // Desktop mode: Electron is the UI — never auto-open in a browser.
+      output.T3CODE_NO_BROWSER = "1";
+    }
+
     if (mode === "dev") {
       output.T3CODE_MODE = "web";
       delete output.T3CODE_DESKTOP_WS_URL;

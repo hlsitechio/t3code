@@ -37,10 +37,18 @@ export const Route = createRootRouteWithContext<{
 function RootRouteView() {
   if (!readNativeApi()) {
     return (
-      <div className="flex h-screen flex-col bg-background text-foreground">
-        <div className="flex flex-1 items-center justify-center">
-          <p className="text-sm text-muted-foreground">
-            Connecting to {APP_DISPLAY_NAME} server...
+      <div className="flex h-screen flex-col items-center justify-center gap-4 bg-[#09090b] text-white">
+        <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-white/[0.08] bg-white/[0.04]">
+          <svg className="h-7 w-7 text-white/80" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0021 18V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v12a2.25 2.25 0 002.25 2.25z" />
+          </svg>
+        </div>
+        <div className="text-center">
+          <h1 className="text-xl font-semibold">{APP_DISPLAY_NAME}</h1>
+          <p className="mt-2 max-w-sm text-sm text-zinc-500">
+            This app requires the desktop client. Download it from the releases page or run{" "}
+            <code className="rounded bg-white/[0.06] px-1.5 py-0.5 text-xs text-zinc-300">npx t3</code>{" "}
+            to start.
           </p>
         </div>
       </div>

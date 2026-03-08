@@ -3,6 +3,7 @@ import * as Crypto from "node:crypto";
 import * as FS from "node:fs";
 import * as Http from "node:http";
 import * as OS from "node:os";
+import { runFirstRunBootstrap } from "./bootstrapDeps";
 import * as Path from "node:path";
 
 import {
@@ -2040,6 +2041,20 @@ async function bootstrap(): Promise<void> {
   writeDesktopLogHeader("bootstrap backend start requested");
   mainWindow = createWindow();
   writeDesktopLogHeader("bootstrap main window created");
+
+  // First-run dependency check — only runs once per install
+  const bootstrapMarker = Path.join(STATE_DIR, ".deps-checked");
+  if (!FS.existsSync(bootstrapMarker)) {
+    void runFirstRunBootstrap(mainWindow)
+      .then(() => {
+        FS.mkdirSync(Path.dirname(bootstrapMarker), { recursive: true });
+        FS.writeFileSync(bootstrapMarker, new Date().toISOString());
+        writeDesktopLogHeader("first-run dependency bootstrap complete");
+      })
+      .catch((err) => {
+        writeDesktopLogHeader(`first-run dependency bootstrap error: ${err}`);
+      });
+  }
 }
 
 app.on("before-quit", () => {

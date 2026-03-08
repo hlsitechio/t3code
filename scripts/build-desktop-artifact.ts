@@ -57,7 +57,7 @@ const PLATFORM_CONFIG: Record<typeof BuildPlatform.Type, PlatformConfig> = {
   },
   win: {
     cliFlag: "--win",
-    defaultTarget: "nsis",
+    defaultTarget: "msi",
     archChoices: ["x64", "arm64"],
   },
 };
@@ -453,6 +453,7 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     directories: {
       buildResources: "apps/desktop/resources",
     },
+    npmRebuild: false,
   };
   const publishConfig = resolveGitHubPublishConfig();
   if (publishConfig) {
@@ -484,6 +485,17 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       winConfig.azureSignOptions = yield* AzureTrustedSigningOptionsConfig;
     }
     buildConfig.win = winConfig;
+
+    // MSI installer configuration
+    if (target === "msi") {
+      buildConfig.msi = {
+        oneClick: false,
+        perMachine: true,
+        runAfterFinish: true,
+        createDesktopShortcut: true,
+        createStartMenuShortcut: true,
+      };
+    }
   }
 
   return buildConfig;

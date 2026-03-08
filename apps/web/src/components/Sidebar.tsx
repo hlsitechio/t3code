@@ -25,7 +25,7 @@ import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/rea
 import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
 import { useAppSettings } from "../appSettings";
 import { isElectron } from "../env";
-import { APP_STAGE_LABEL } from "../branding";
+import { APP_DISPLAY_NAME, APP_STAGE_LABEL } from "../branding";
 import { newCommandId } from "../lib/utils";
 import { useStore } from "../store";
 import { isChatNewLocalShortcut, isChatNewShortcut, shortcutLabelForCommand } from "../keybindings";
@@ -1784,7 +1784,7 @@ export default function Sidebar() {
               >
                 <UserRoundIcon className="size-4" />
               </TooltipTrigger>
-              <TooltipPopup side="right">{auth.session?.email ?? "Signed in"}</TooltipPopup>
+              <TooltipPopup side="right">Signed in</TooltipPopup>
             </Tooltip>
           ) : (
             <div className="rounded-2xl border border-border/70 bg-background/55 px-3 py-3">
@@ -1797,7 +1797,7 @@ export default function Sidebar() {
                     Signed in
                   </div>
                   <div className="truncate text-sm font-medium text-foreground">
-                    {auth.session?.email}
+                    {APP_DISPLAY_NAME}
                   </div>
                 </div>
               </div>
