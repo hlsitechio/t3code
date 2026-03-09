@@ -148,18 +148,27 @@ function Install-Dep {
         $p.WaitForExit()
         $wingetExit = $p.ExitCode
 
-        $wingetOk = ($wingetExit -eq 0) -or ($allOutput -match "already installed|No available upgrade|No installed package|No newer package|No applicable update|no applicable|is running")
+        # Match success in any language (English, French, etc.)
+        $wingetOk = ($wingetExit -eq 0) -or ($allOutput -match "already installed|No available upgrade|No installed package|No newer package|No applicable update|no applicable|is running|correctement|succ|Aucun|aucun")
         if ($wingetOk) {
             Write-Ok "$Name up to date (winget)"
             Refresh-Path
             return
         }
-        # If upgrade failed, try install (handles version mismatch)
+        # If upgrade failed but tool is already installed, that's fine
         if ($ForceUpgrade) {
+            # Check if the tool actually works — if so, no need to retry
+            $cmdName = $Name.Split(" ")[0].ToLower()
+            if ($cmdName -eq "node.js") { $cmdName = "node" }
+            if ($cmdName -eq "github") { $cmdName = "gh" }
+            if (Test-Command $cmdName) {
+                Write-Ok "$Name already installed (not managed by winget)"
+                return
+            }
             Write-Step "Retrying $Name install via winget..."
             $result2 = winget install --id $WingetId --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1
-            if ($LASTEXITCODE -eq 0 -or "$result2" -match "already installed") {
-                Write-Ok "$Name up to date (winget)"
+            if ($LASTEXITCODE -eq 0 -or "$result2" -match "already installed|correctement") {
+                Write-Ok "$Name installed (winget)"
                 Refresh-Path
                 return
             }
