@@ -133,6 +133,7 @@ const buildCmd = Command.make(
           cwd: serverDir,
           stdout: config.verbose ? "inherit" : "ignore",
           stderr: "inherit",
+          shell: process.platform === "win32",
         })`bun tsdown`,
       );
 
@@ -239,6 +240,7 @@ const publishCmd = Command.make(
                 cwd: serverDir,
                 stdout: config.verbose ? "inherit" : "ignore",
                 stderr: "inherit",
+                shell: process.platform === "win32",
               }),
             );
           }),

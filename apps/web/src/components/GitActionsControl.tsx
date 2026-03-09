@@ -105,7 +105,7 @@ function getMenuActionDisabledReason(
   }
 
   if (hasOpenPr) {
-    return "Open PR is currently unavailable.";
+    return "View PR is currently unavailable.";
   }
   if (!hasBranch) {
     return "Detached HEAD: checkout a branch before creating a PR.";
@@ -381,12 +381,12 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
                 },
               }
             : shouldOfferOpenPrCta
-              ? {
-                  actionProps: {
-                    children: "Open PR",
-                    onClick: () => {
-                      const api = readNativeApi();
-                      if (!api) return;
+                ? {
+                    actionProps: {
+                      children: "View PR",
+                      onClick: () => {
+                        const api = readNativeApi();
+                        if (!api) return;
                       closeResultToast();
                       void api.shell.openExternal(prUrl);
                     },
