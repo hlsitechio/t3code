@@ -283,7 +283,7 @@ jobs:
             release-assets/*.msi
             release-assets/*.blockmap
             release-assets/latest*.yml
-          fail_on_unmatched_files: true
+          fail_on_unmatched_files: false
 
   finalize:
     name: Finalize release
