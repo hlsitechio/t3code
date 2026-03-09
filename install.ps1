@@ -1,22 +1,29 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    One-shot installer for T3 Code desktop app.
+    One-shot installer & updater for T3 Code desktop app.
 
 .DESCRIPTION
-    Downloads and installs the latest T3 Code MSI, plus all required
-    dependencies (Node.js, Git, GitHub CLI, provider CLIs) via winget
-    or Chocolatey. Supports future updates through both package managers.
+    Downloads and installs (or updates) the latest T3 Code MSI, plus all
+    required dependencies (Node.js, Git, GitHub CLI, provider CLIs) via
+    winget or Chocolatey.
+
+    Run the same command for both install and update — it auto-detects.
 
 .EXAMPLE
+    # Fresh install or update:
     iex (irm https://raw.githubusercontent.com/hlsitechio/t3code/main/install.ps1)
 #>
 
 $ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"
+$ProgressPreference    = "SilentlyContinue"
 
-$repo = "hlsitechio/t3code"
+$repo    = "hlsitechio/t3code"
 $appName = "T3 Code"
+
+# ---------------------------------------------------------------------------
+# Output helpers
+# ---------------------------------------------------------------------------
 
 function Write-Step($msg) { Write-Host "  > $msg" -ForegroundColor Cyan }
 function Write-Ok($msg)   { Write-Host "  + $msg" -ForegroundColor Green }
@@ -24,9 +31,40 @@ function Write-Skip($msg) { Write-Host "  - $msg" -ForegroundColor DarkGray }
 function Write-Err($msg)  { Write-Host "  x $msg" -ForegroundColor Red }
 function Write-Warn($msg) { Write-Host "  ! $msg" -ForegroundColor Yellow }
 
+# ---------------------------------------------------------------------------
+# Detect existing T3 Code installation
+# ---------------------------------------------------------------------------
+
+function Get-InstalledT3Version {
+    # Check registry for MSI-installed version
+    $paths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    foreach ($path in $paths) {
+        try {
+            $entry = Get-ItemProperty $path -ErrorAction SilentlyContinue |
+                Where-Object { $_.DisplayName -match "T3.?Code" } |
+                Select-Object -First 1
+            if ($entry) {
+                return $entry.DisplayVersion
+            }
+        } catch {}
+    }
+    return $null
+}
+
+$installedVersion = Get-InstalledT3Version
+$isUpdate = $null -ne $installedVersion
+
 Write-Host ""
 Write-Host "  ========================================" -ForegroundColor White
-Write-Host "           T3 Code Installer              " -ForegroundColor White
+if ($isUpdate) {
+    Write-Host "       T3 Code Updater (v$installedVersion)      " -ForegroundColor White
+} else {
+    Write-Host "           T3 Code Installer              " -ForegroundColor White
+}
 Write-Host "  ========================================" -ForegroundColor White
 Write-Host ""
 
@@ -65,7 +103,7 @@ function Refresh-Path {
 }
 
 # ---------------------------------------------------------------------------
-# Universal package installer (winget > choco > manual)
+# Universal package installer/updater (winget > choco > manual)
 # ---------------------------------------------------------------------------
 
 function Install-Dep {
@@ -73,15 +111,17 @@ function Install-Dep {
         [string]$Name,
         [string]$WingetId,
         [string]$ChocoId,
-        [string]$ManualUrl
+        [string]$ManualUrl,
+        [switch]$ForceUpgrade
     )
 
     # Try winget first
     if ($hasWinget) {
-        Write-Step "Installing $Name via winget..."
-        $result = winget install --id $WingetId --accept-package-agreements --accept-source-agreements --disable-interactivity --silent 2>&1
-        if ($LASTEXITCODE -eq 0 -or "$result" -match "already installed") {
-            Write-Ok "$Name installed (winget)"
+        $action = if ($ForceUpgrade) { "upgrade" } else { "install" }
+        Write-Step "$( if ($ForceUpgrade) { 'Updating' } else { 'Installing' } ) $Name via winget..."
+        $result = winget $action --id $WingetId --accept-package-agreements --accept-source-agreements --disable-interactivity --silent 2>&1
+        if ($LASTEXITCODE -eq 0 -or "$result" -match "already installed" -or "$result" -match "No available upgrade") {
+            Write-Ok "$Name up to date (winget)"
             Refresh-Path
             return $true
         }
@@ -89,10 +129,11 @@ function Install-Dep {
 
     # Fallback to Chocolatey
     if ($hasChoco) {
-        Write-Step "Installing $Name via Chocolatey..."
-        choco install $ChocoId -y --no-progress 2>$null
+        $action = if ($ForceUpgrade) { "upgrade" } else { "install" }
+        Write-Step "$( if ($ForceUpgrade) { 'Updating' } else { 'Installing' } ) $Name via Chocolatey..."
+        choco $action $ChocoId -y --no-progress 2>$null
         if ($LASTEXITCODE -eq 0) {
-            Write-Ok "$Name installed (Chocolatey)"
+            Write-Ok "$Name up to date (Chocolatey)"
             Refresh-Path
             return $true
         }
@@ -114,7 +155,11 @@ Write-Host "  -----------------------" -ForegroundColor DarkGray
 # Node.js
 if (Test-Command "node") {
     $nodeVer = & node --version 2>$null
-    Write-Ok "Node.js $nodeVer (already installed)"
+    if ($isUpdate) {
+        Install-Dep -Name "Node.js LTS" -WingetId "OpenJS.NodeJS.LTS" -ChocoId "nodejs-lts" -ManualUrl "https://nodejs.org" -ForceUpgrade
+    } else {
+        Write-Ok "Node.js $nodeVer (already installed)"
+    }
 } else {
     Install-Dep -Name "Node.js LTS" -WingetId "OpenJS.NodeJS.LTS" -ChocoId "nodejs-lts" -ManualUrl "https://nodejs.org"
 }
@@ -122,7 +167,11 @@ if (Test-Command "node") {
 # Git
 if (Test-Command "git") {
     $gitVer = & git --version 2>$null
-    Write-Ok "$gitVer (already installed)"
+    if ($isUpdate) {
+        Install-Dep -Name "Git" -WingetId "Git.Git" -ChocoId "git" -ManualUrl "https://git-scm.com" -ForceUpgrade
+    } else {
+        Write-Ok "$gitVer (already installed)"
+    }
 } else {
     Install-Dep -Name "Git" -WingetId "Git.Git" -ChocoId "git" -ManualUrl "https://git-scm.com"
 }
@@ -130,7 +179,11 @@ if (Test-Command "git") {
 # GitHub CLI
 if (Test-Command "gh") {
     $ghVer = & gh --version 2>$null | Select-Object -First 1
-    Write-Ok "$ghVer (already installed)"
+    if ($isUpdate) {
+        Install-Dep -Name "GitHub CLI" -WingetId "GitHub.cli" -ChocoId "gh" -ManualUrl "https://cli.github.com" -ForceUpgrade
+    } else {
+        Write-Ok "$ghVer (already installed)"
+    }
 } else {
     Install-Dep -Name "GitHub CLI" -WingetId "GitHub.cli" -ChocoId "gh" -ManualUrl "https://cli.github.com"
 }
@@ -152,7 +205,17 @@ if (Test-Command "npm") {
 
     foreach ($tool in $npmPkgs) {
         if (Test-Command $tool.Cmd) {
-            Write-Skip "$($tool.Name) (already installed)"
+            if ($isUpdate) {
+                Write-Step "Updating $($tool.Name)..."
+                npm update -g $tool.Pkg 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Ok "$($tool.Name) updated"
+                } else {
+                    Write-Warn "$($tool.Name) update failed (run: npm update -g $($tool.Pkg))"
+                }
+            } else {
+                Write-Skip "$($tool.Name) (already installed)"
+            }
         } else {
             Write-Step "Installing $($tool.Name)..."
             npm install -g $tool.Pkg 2>$null
@@ -169,7 +232,7 @@ if (Test-Command "npm") {
 }
 
 # ---------------------------------------------------------------------------
-# 3. Download & install T3 Code MSI
+# 3. Download & install/update T3 Code MSI
 # ---------------------------------------------------------------------------
 
 Write-Host ""
@@ -179,7 +242,7 @@ Write-Host "  -------------------------" -ForegroundColor DarkGray
 Write-Step "Fetching latest release from GitHub..."
 
 try {
-    $headers = @{ "User-Agent" = "T3CodeInstaller/1.0" }
+    $headers = @{ "User-Agent" = "T3CodeInstaller/2.0" }
     $release = $null
     $msiAsset = $null
 
@@ -202,63 +265,70 @@ try {
     if (-not $msiAsset) {
         Write-Err "No MSI found in releases at github.com/$repo"
         Write-Warn "Visit https://github.com/$repo/releases to download manually."
-        exit 1
-    }
-
-    $msiUrl = $msiAsset.browser_download_url
-    $msiName = $msiAsset.name
-    $sizeMB = [math]::Round($msiAsset.size / 1MB, 1)
-    $tempDir = Join-Path $env:TEMP "t3code-install"
-    $msiPath = Join-Path $tempDir $msiName
-
-    if (-not (Test-Path $tempDir)) { New-Item -ItemType Directory -Path $tempDir -Force | Out-Null }
-
-    Write-Step "Downloading $msiName ($sizeMB MB)..."
-    Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
-
-    Write-Step "Installing T3 Code (admin prompt may appear)..."
-    $proc = Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" /qb /norestart" -Wait -Verb RunAs -PassThru
-    if ($proc.ExitCode -eq 0) {
-        Write-Ok "T3 Code $($release.tag_name) installed!"
+        # Don't exit — deps were still installed successfully
     } else {
-        Write-Err "MSI install returned exit code $($proc.ExitCode)"
+        $latestVersion = $release.tag_name -replace '^v', ''
+        $msiUrl  = $msiAsset.browser_download_url
+        $msiName = $msiAsset.name
+        $sizeMB  = [math]::Round($msiAsset.size / 1MB, 1)
+
+        # Compare versions — skip download if already on latest
+        if ($installedVersion -and $installedVersion -eq $latestVersion) {
+            Write-Ok "T3 Code v$installedVersion is already the latest version"
+        } else {
+            $tempDir = Join-Path $env:TEMP "t3code-install"
+            $msiPath = Join-Path $tempDir $msiName
+
+            if (-not (Test-Path $tempDir)) { New-Item -ItemType Directory -Path $tempDir -Force | Out-Null }
+
+            if ($isUpdate) {
+                Write-Step "Downloading update: v$installedVersion -> v$latestVersion ($sizeMB MB)..."
+            } else {
+                Write-Step "Downloading $msiName ($sizeMB MB)..."
+            }
+            Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
+
+            Write-Step "Installing T3 Code (admin prompt may appear)..."
+            # MSI /i handles both install and upgrade automatically
+            $proc = Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" /qb /norestart" -Wait -Verb RunAs -PassThru
+            if ($proc.ExitCode -eq 0) {
+                if ($isUpdate) {
+                    Write-Ok "T3 Code updated to v$latestVersion!"
+                } else {
+                    Write-Ok "T3 Code v$latestVersion installed!"
+                }
+            } else {
+                Write-Err "MSI install returned exit code $($proc.ExitCode)"
+            }
+
+            # Cleanup
+            Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
-
-    # Cleanup
-    Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-
 } catch {
     Write-Err "Download/install failed: $_"
     Write-Warn "Visit https://github.com/$repo/releases to download manually."
-    exit 1
 }
 
 # ---------------------------------------------------------------------------
-# 4. Update channel setup
+# 4. Update channel info
 # ---------------------------------------------------------------------------
 
 Write-Host ""
 Write-Host "  [4/4] Update Channels" -ForegroundColor White
 Write-Host "  ---------------------" -ForegroundColor DarkGray
 
-# T3 Code has built-in auto-update via electron-updater (checks GitHub Releases).
-# Additionally, register with system package managers for CLI updates.
+Write-Ok "Auto-update: T3 Code checks GitHub Releases on every launch"
+Write-Ok "Manual update: re-run this same command anytime"
 
 if ($hasWinget) {
-    Write-Ok "winget: T3 Code will appear in 'winget upgrade' once published to winget-pkgs"
-    Write-Skip "  Future: winget upgrade --id T3Tools.T3Code"
+    Write-Skip "  winget upgrade --all  (updates core deps)"
 }
-
 if ($hasChoco) {
-    Write-Ok "Chocolatey: T3 Code will appear in 'choco upgrade' once published"
-    Write-Skip "  Future: choco upgrade t3code -y"
+    Write-Skip "  choco upgrade all -y  (updates core deps)"
 }
-
-Write-Ok "Auto-update: T3 Code checks GitHub Releases on every launch"
-
-# npm tools can be updated with:
 if (Test-Command "npm") {
-    Write-Skip "Update CLI tools anytime: npm update -g @openai/codex @anthropic-ai/claude-code @google/gemini-cli"
+    Write-Skip "  npm update -g @openai/codex @anthropic-ai/claude-code @google/gemini-cli"
 }
 
 # ---------------------------------------------------------------------------
@@ -267,22 +337,26 @@ if (Test-Command "npm") {
 
 Write-Host ""
 Write-Host "  ========================================" -ForegroundColor Green
-Write-Host "       Installation Complete!              " -ForegroundColor Green
+if ($isUpdate) {
+    Write-Host "         Update Complete!                  " -ForegroundColor Green
+} else {
+    Write-Host "       Installation Complete!              " -ForegroundColor Green
+}
 Write-Host "  ========================================" -ForegroundColor Green
 Write-Host ""
-Write-Host "  Launch T3 Code from the Start Menu or Desktop shortcut." -ForegroundColor White
-Write-Host ""
-Write-Host "  Quick start:" -ForegroundColor DarkGray
-Write-Host "    1. Sign in with your AI providers (ChatGPT, Claude, Gemini)" -ForegroundColor DarkGray
-Write-Host "    2. Connect your GitHub account" -ForegroundColor DarkGray
-Write-Host "    3. Start coding!" -ForegroundColor DarkGray
-Write-Host ""
-Write-Host "  Update everything:" -ForegroundColor DarkGray
-if ($hasWinget) {
-    Write-Host "    winget upgrade --all" -ForegroundColor DarkGray
+
+if (-not $isUpdate) {
+    Write-Host "  Launch T3 Code from the Start Menu or Desktop shortcut." -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Quick start:" -ForegroundColor DarkGray
+    Write-Host "    1. Sign in with your AI providers (ChatGPT, Claude, Gemini)" -ForegroundColor DarkGray
+    Write-Host "    2. Connect your GitHub account" -ForegroundColor DarkGray
+    Write-Host "    3. Start coding!" -ForegroundColor DarkGray
+} else {
+    Write-Host "  Restart T3 Code to use the latest version." -ForegroundColor White
 }
-if ($hasChoco) {
-    Write-Host "    choco upgrade all -y" -ForegroundColor DarkGray
-}
-Write-Host "    npm update -g @openai/codex @anthropic-ai/claude-code @google/gemini-cli" -ForegroundColor DarkGray
+
+Write-Host ""
+Write-Host "  Run this command anytime to update:" -ForegroundColor DarkGray
+Write-Host "    iex (irm https://raw.githubusercontent.com/$repo/main/install.ps1)" -ForegroundColor DarkGray
 Write-Host ""
