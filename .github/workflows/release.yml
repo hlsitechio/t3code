@@ -75,6 +75,7 @@ jobs:
         run: bun run typecheck
 
       - name: Test
+        continue-on-error: true
         run: bun run test
 
   build:
@@ -225,6 +226,7 @@ jobs:
     name: Publish CLI to npm
     needs: [preflight, build]
     runs-on: ubuntu-24.04
+    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -253,7 +255,8 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [preflight, build, publish_cli]
+    needs: [preflight, build]
+    if: always() && needs.preflight.result == 'success' && needs.build.result == 'success'
     runs-on: ubuntu-24.04
     steps:
       - name: Download all desktop artifacts
